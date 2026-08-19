@@ -45,19 +45,19 @@ bool PersistableStoreBase::writeDocToFileAtomic(const char* path, const JsonDocu
 
 DocReadStatus PersistableStoreBase::readDocFromFileChecked(const char* path, JsonDocument& doc) {
   if (!Storage.exists(path)) {
-    return DocReadStatus::Missing;  // Expected on first boot — not an error.
+    return classifyDocRead(false, false, false);  // Expected on first boot — not an error.
   }
   String json = Storage.readFile(path);
   if (json.isEmpty()) {
     LOG_ERR("PERSIST", "Failed to read %s (empty)", path);
-    return DocReadStatus::Unreadable;
+    return classifyDocRead(true, true, false);
   }
   const auto error = deserializeJson(doc, json);
   if (error) {
     LOG_ERR("PERSIST", "JSON parse error in %s: %s", path, error.c_str());
-    return DocReadStatus::ParseError;
+    return classifyDocRead(true, false, true);
   }
-  return DocReadStatus::Ok;
+  return classifyDocRead(true, false, false);
 }
 
 bool PersistableStoreBase::readDocFromFile(const char* path, JsonDocument& doc) {

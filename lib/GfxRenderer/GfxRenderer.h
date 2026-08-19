@@ -246,6 +246,9 @@ class GfxRenderer {
   // white ground into white text on black without reloading or redrawing any
   // glyphs — unlike the fill-then-redraw-white approach in
   // DictionaryWordSelectActivity, which pays an SD glyph load per word.
+  // It flips framebuffer bits regardless of renderMode, so in GRAYSCALE_MSB/GRAYSCALE_LSB
+  // passes it inverts that bit-plane rather than the visible colour — callers must apply
+  // it in every pass or the highlight vanishes under anti-aliasing.
   void invertRect(int x, int y, int width, int height) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, Color color) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, bool roundTopLeft, bool roundTopRight,
