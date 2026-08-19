@@ -1442,9 +1442,6 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       highlightRanges.push_back(entry->range);  // value, never the pointer: addHighlight can reallocate
     }
   }
-  // TEMPORARY (removed in Task 4): a fixed range so the overlay can be seen on
-  // hardware before PassageSelectActivity exists to create real highlights.
-  highlightRanges.push_back(VisibleRange{page->visibleTextOffset, page->visibleTextOffset + 40});
 
   const int highlightColumnRight = renderer.getScreenWidth() - orientedMarginRight;
   const int highlightLineHeight = renderer.getLineHeight(fontId);
