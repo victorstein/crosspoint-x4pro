@@ -14,6 +14,7 @@
 #include "HighlightOverlay.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "TagPickerActivity.h"
 #include "components/UITheme.h"
 
 void PassageSelectActivity::onEnter() {
@@ -153,10 +154,65 @@ void PassageSelectActivity::commitAt(const int index) {
     requestUpdate();
     return;
   }
-  finalizeSelection(index);
+  if (phase == Phase::PickingEnd) {
+    showActionChooser(index);
+  }
+  // ChoosingAction: word taps/gestures don't reach here -- actionChooser
+  // (active by then) absorbs all input first, in loop().
 }
 
-void PassageSelectActivity::finalizeSelection(const int endIndex) {
+void PassageSelectActivity::showActionChooser(const int endIndex) {
+  pendingEndIndex = endIndex;
+  phase = Phase::ChoosingAction;
+
+  // The tap or gesture that commits this second anchor is the SAME event
+  // that opens the chooser, so -- unlike every other OptionPopup use in this
+  // codebase, which always opens from a row/cursor position already drawn on
+  // a prior frame -- there is no earlier frame that shows the corrected
+  // two-anchor outline yet. Force one synchronous render of it now, with
+  // actionChooser still inactive, so its "draw over the current screen, no
+  // clear" contract (see OptionPopup's class comment) has the right pixels
+  // underneath once it shows.
+  requestUpdateAndWait();
+
+  const char* options[] = {tr(STR_HIGHLIGHT), tr(STR_TAG), tr(STR_CANCEL)};
+  actionChooser.show(tr(STR_HIGHLIGHT_PASSAGE), options, 3, 0, [this](const int choice) {
+    switch (choice) {
+      case 0:  // Highlight: save immediately, no tags.
+        finalizeSelection(pendingEndIndex);
+        break;
+      case 1:  // Tag: pick tags first, then save with whatever comes back.
+        startTagFlow(pendingEndIndex);
+        break;
+      default:  // Cancel: discard the selection, save nothing.
+        finish();
+        break;
+    }
+  });
+  requestUpdate();
+}
+
+void PassageSelectActivity::startTagFlow(const int endIndex) {
+  startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc),
+                         [this, endIndex](const ActivityResult& result) {
+                           // Cancelling the picker discards only the TAG
+                           // selection, not the highlight itself -- the
+                           // two-anchor passage was already committed before
+                           // this sub-step opened, and TagPickerActivity's
+                           // own contract (see its class comment) is that the
+                           // caller decides what "no tags chosen" means. Here
+                           // that means the same untagged save Highlight
+                           // would have produced, not discarding the work the
+                           // user already did picking two anchors.
+                           std::vector<uint16_t> tagIndices;
+                           if (!result.isCancelled) {
+                             tagIndices = std::get<TagSelectionResult>(result.data).tagIndices;
+                           }
+                           finalizeSelection(endIndex, std::move(tagIndices));
+                         });
+}
+
+void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<uint16_t> tagIndices) {
   const int lo = std::min(anchorIndex, endIndex);
   const int hi = std::max(anchorIndex, endIndex);
 
@@ -177,6 +233,10 @@ void PassageSelectActivity::finalizeSelection(const int endIndex) {
   // offsets are strictly increasing across tokens, and no path emits two
   // words at the same offset (verified; see the plan).
   entry.range = VisibleRange{minOffset, maxOffset + 1};
+  // Truncated to MAX_TAGS_PER_HIGHLIGHT by addHighlight if ever oversized, but
+  // TagPickerActivity already blocks picking a 9th tag, so this is a no-op in
+  // practice, not a second, divergent cap.
+  entry.tagIndices = std::move(tagIndices);
 
   if (!highlightDoc.addHighlight(std::move(entry))) {
     // HighlightDoc::MAX_HIGHLIGHTS reached -- nothing was appended.
@@ -215,6 +275,10 @@ void PassageSelectActivity::loop() {
     finish();
     return;
   }
+
+  // ChoosingAction: actionChooser (touch-driven) owns all input until it
+  // fires or is dismissed; nothing below applies to word selection anymore.
+  if (actionChooser.handleInput(mappedInput, [this] { requestUpdate(); })) return;
 
   if (words.empty()) return;
 
@@ -267,7 +331,9 @@ bool PassageSelectActivity::handleHomeGesture() {
   // ActivityManager treats an unconsumed Home gesture as "go home", which
   // would abandon the selection with no warning -- always consume it here so
   // that never happens, committing the current cursor when there's something
-  // to commit.
+  // to commit. During ChoosingAction, commitAt() is a no-op (see its own
+  // comment): actionChooser's three rows are unambiguous single-tap targets,
+  // so Home has nothing useful left to commit there and is simply absorbed.
   if (!words.empty()) commitAt(cursor);
   return true;
 }
@@ -348,12 +414,18 @@ void PassageSelectActivity::drawHints() const {
 }
 
 void PassageSelectActivity::render(RenderLock&&) {
+  // actionChooser draws over the current screen without clearing it (see
+  // OptionPopup's class comment), so it must win before anything below
+  // touches the framebuffer. By the time it is active, showActionChooser()
+  // has already forced one synchronous render of the final two-anchor
+  // outline (via requestUpdateAndWait()), so the pixels underneath are
+  // always the correct, final selection, never mid-cursor-move.
+  if (actionChooser.processRender(renderer, mappedInput)) return;
+
   // Differential fast path: only the outline moved and the framebuffer still
-  // holds a clean baseline (committed highlights + page text, no popup since
-  // this activity never shows one mid-flow -- finalizeSelection's messages
-  // are always immediately followed by finish()). Restore the pixels behind
-  // the old outline, draw the new one, and push -- skipping the two-pass page
-  // render entirely.
+  // holds a clean baseline (committed highlights + page text). Restore the
+  // pixels behind the old outline, draw the new one, and push -- skipping the
+  // two-pass page render entirely.
   if (snapshotValid && !words.empty()) {
     renderer.writeFramebufferRegion(snapshotX, snapshotY, snapshotW, snapshotH, snapshot.get());
     drawSelectionOutline();

@@ -5,23 +5,35 @@
 #include <Epub/Page.h>
 #include <Epub/VisibleRange.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "activities/Activity.h"
+#include "components/OptionPopup.h"
 
 // Two-anchor passage selection over the current reader page, for creating a
 // highlight. Tap or arrow to the first word and confirm, then tap or arrow to
-// the last word and confirm; the resulting VisibleRange is appended to
-// `highlightDoc` and saved. The X4 Pro has no physical Back/Confirm: Back
-// comes from the touchscreen's left-edge swipe (MappedInputManager routes it
-// through Button::Back regardless of hardware mapping) and is checked first
-// in every loop() iteration, so it cancels out of either anchor. Confirm has
-// no reliable physical or GPIO path on this board, so handleHomeGesture() is
-// overridden to repurpose the capacitive Home-key tap as Confirm instead of
-// letting ActivityManager treat it as "go home" -- see BoardConfig.h:1392-1398
-// and MappedInputManager::wasHomeGesture's doc comment.
+// the last word and confirm; a third step then asks Highlight / Tag / Cancel
+// via an OptionPopup (the same modal-choice widget EpubReaderMenuActivity and
+// HighlightsActivity already use) -- Highlight saves with no tags (the
+// original behaviour), Tag pushes TagPickerActivity and applies whatever it
+// returns, Cancel discards the selection entirely. The X4 Pro has no physical
+// Back/Confirm: Back comes from the touchscreen's left-edge swipe
+// (MappedInputManager routes it through Button::Back regardless of hardware
+// mapping) and is checked first in every loop() iteration, unconditionally,
+// so it cancels out of any phase -- including the chooser, where it discards
+// the whole selection exactly like picking Cancel. Confirm has no reliable
+// physical or GPIO path on this board, so handleHomeGesture() is overridden
+// to repurpose the capacitive Home-key tap as Confirm for the two anchor
+// picks instead of letting ActivityManager treat it as "go home" -- see
+// BoardConfig.h:1392-1398 and MappedInputManager::wasHomeGesture's doc
+// comment. While the chooser is up, Home is still consumed (never falls
+// through to "go home") but otherwise a no-op: unlike a single word, the
+// three chooser rows are unambiguous single-tap targets, so there is no
+// cursor-plus-confirm dance to repurpose Home for there, and OptionPopup
+// itself already fully drives via touch.
 class PassageSelectActivity final : public Activity {
  public:
   explicit PassageSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page,
@@ -57,14 +69,16 @@ class PassageSelectActivity final : public Activity {
     uint32_t offset;
   };
 
-  enum class Phase : uint8_t { PickingStart, PickingEnd };
+  enum class Phase : uint8_t { PickingStart, PickingEnd, ChoosingAction };
 
   void extractWords();
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
   void moveVertical(int direction);
   void commitAt(int index);
-  void finalizeSelection(int endIndex);
+  void showActionChooser(int endIndex);
+  void startTagFlow(int endIndex);
+  void finalizeSelection(int endIndex, std::vector<uint16_t> tagIndices = {});
   void drawSelectionOutline();
   void drawHints() const;
 
@@ -93,6 +107,11 @@ class PassageSelectActivity final : public Activity {
   Phase phase = Phase::PickingStart;
   int cursor = 0;
   int anchorIndex = -1;
+  // The just-committed second anchor, held only across the ChoosingAction
+  // phase so the OptionPopup's callback (and the TagPickerActivity result
+  // handler it may lead to) can reach finalizeSelection with it.
+  int pendingEndIndex = -1;
+  OptionPopup actionChooser;
 
   // Differential repaint of the selection outline only: the pixels behind its
   // bounding box (border included), so a cursor move restores them and
