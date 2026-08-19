@@ -185,26 +185,35 @@ void HighlightsActivity::deleteHighlight(const size_t docIndex) {
   // at its original position.
   HighlightEntry removed = highlightDoc_.highlights()[docIndex];
   highlightDoc_.removeHighlight(docIndex);
+  // Rebuild before the SD save, not after: rowItems_[i].label aliases each
+  // entry's std::string storage (see rebuildRowItems), and the render task
+  // runs concurrently under RenderLock -- it must never see rows aliasing
+  // the erased/moved storage while the save is in flight.
+  rebuildVisibleIndices();
+  rebuildRowItems();
 
   switch (HighlightFile::save(bookPath_, highlightDoc_)) {
     case HighlightFile::SaveResult::Ok:
       break;
     case HighlightFile::SaveResult::TooLarge:
       highlightDoc_.addHighlight(std::move(removed));
+      // A rolled-back entry re-appended by addHighlight is a different
+      // document index than the one just removed, so visibleIndices_ (and
+      // everything derived from it) must not be patched in place -- only a
+      // full rebuild from highlightDoc_ is safe here, again before rowItems_
+      // can be read by a concurrent render.
+      rebuildVisibleIndices();
+      rebuildRowItems();
       ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_TOO_LARGE));
       break;
     case HighlightFile::SaveResult::WriteFailed:
       highlightDoc_.addHighlight(std::move(removed));
+      rebuildVisibleIndices();
+      rebuildRowItems();
       ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_SAVE_FAILED));
       break;
   }
 
-  // Rebuild regardless of outcome: a rolled-back entry re-appended by
-  // addHighlight is a different document index than the one just removed, so
-  // visibleIndices_ (and everything derived from it) must not be patched in
-  // place -- only a full rebuild from highlightDoc_ is safe here.
-  rebuildVisibleIndices();
-  rebuildRowItems();
   moveSelectionTo(std::clamp(activeNav().selected, 0, listCount() - 1));
 }
 
