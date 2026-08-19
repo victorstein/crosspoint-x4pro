@@ -688,10 +688,16 @@ Expected: `SUCCESS`, producing `.pio/build/x4pro/firmware.bin`.
 
 ```bash
 git status --short
-git log --oneline upstream/master..HEAD
+git log --oneline upstream/develop..HEAD
 ```
 
-Expected: a clean tree and five feature commits.
+Expected: a clean tree and the feature commits.
+
+> **Use `upstream/develop`, not `upstream/master`.** Upstream's default branch is
+> `develop` (`upstream/HEAD -> upstream/develop`), and its contributing guide tells
+> contributors to branch from it. `master` is stale — it does not even contain the
+> base commit this fork was taken from, so diffing against it reports hundreds of
+> unrelated files and hides what this branch actually changed.
 
 ---
 
