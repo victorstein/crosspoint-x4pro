@@ -99,6 +99,9 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (dictionaryName[0] != '\0') {
     doc["dictionaryName"] = dictionaryName;
   }
+  // Long-press menu function — uses dynamic getter/setter in SettingsList (per-board
+  // displayed list vs. raw enum value), so the generic loop skips it. Save manually.
+  doc["longPressMenuFunction"] = longPressMenuFunction;
 
   // Language -- managed by LanguageSelectActivity, not in SettingsList.
   // Stored as ISO code string ("EN", "DE", ...) for stability across enum reorders.
@@ -215,6 +218,14 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   }
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, load manually
   copyToField(dictionaryName, doc["dictionaryName"] | "", sizeof(dictionaryName));
+
+  // Long-press menu function — uses dynamic getter/setter in SettingsList, load manually.
+  // Clamp against LONG_PRESS_MENU_FUNCTION_COUNT (the full raw enum), not against
+  // info.enumValues.size() (the per-board displayed list, which can be shorter) -- a
+  // Home-key board's saved LP_MENU_HIGHLIGHT must survive being read on a board whose
+  // displayed list has fewer entries.
+  longPressMenuFunction =
+      clamp(doc["longPressMenuFunction"] | (uint8_t)LP_MENU_DISABLED, LONG_PRESS_MENU_FUNCTION_COUNT, LP_MENU_DISABLED);
 
   // Language -- stored as code string for stability across enum reorders.
   if (doc["language"].is<const char*>()) {

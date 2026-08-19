@@ -141,9 +141,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   };
 
   // Long-press Confirm action while reading an EPUB. The setting cycles through these values.
-  // Persisted in settings.json by index: any new function (e.g. dictionary, bookmark) MUST use a
-  // value >= 2 and be appended at the END of the enumValues array in SettingsList.h, otherwise the
-  // stored indices shift and existing saves are silently misinterpreted.
+  // Persisted in settings.json by raw value, not by displayed list position: SettingsList.h's
+  // buildLongPressMenuSetting() uses a valueGetter/valueSetter pair (not the generic ENUM
+  // positional path) to translate between the per-board displayed list and this raw value, so
+  // CrossPointSettings::toJson/fromJson must handle longPressMenuFunction manually rather than
+  // via the generic valuePtr loop -- see the comments there.
   enum LONG_PRESS_MENU_FUNCTION {
     LP_MENU_KOSYNC = 0,
     LP_MENU_DISABLED = 1,
