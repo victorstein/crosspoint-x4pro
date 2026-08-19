@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <vector>
 
 struct WifiResult {
   bool connected = false;
@@ -67,9 +68,17 @@ struct FilePathResult {
   std::string path;
 };
 
+// Indices into HighlightDoc::tags() that TagPickerActivity's caller should
+// apply to whichever highlight it is tagging. Not a HighlightDoc-owning
+// type -- the picker only reports the checked set.
+struct TagSelectionResult {
+  std::vector<uint16_t> tagIndices;
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
-                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult>;
+                 PageResult, ProgressChangeResult, NetworkModeResult, FootnoteResult, FilePathResult,
+                 TagSelectionResult>;
 
 struct ActivityResult {
   bool isCancelled = false;
