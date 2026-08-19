@@ -22,6 +22,16 @@ set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# Pinned to the firmware's version (platformio.ini:141) so host and device
+# cannot diverge. Deliberately NOT .pio/libdeps — that would couple the host
+# suite to a firmware build having run first.
+FetchContent_Declare(
+  arduinojson
+  GIT_REPOSITORY https://github.com/bblanchon/ArduinoJson.git
+  GIT_TAG v7.4.2
+)
+FetchContent_MakeAvailable(arduinojson)
+
 set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 add_library(crosspoint_test_common INTERFACE)
