@@ -1,6 +1,8 @@
 #include "EpubReaderActivity.h"
 
+#include <Epub/HighlightGeometry.h>
 #include <Epub/Page.h>
+#include <Epub/VisibleRange.h>
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
 #include <FsHelpers.h>
@@ -17,6 +19,7 @@
 #include <limits>
 
 #include "../../util/BookmarkFile.h"
+#include "../../util/HighlightFile.h"
 #include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -26,6 +29,7 @@
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
+#include "HighlightOverlay.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
@@ -223,6 +227,23 @@ bool EpubReaderActivity::loadBook() {
   }
 
   loadCachedBookmarks();
+
+#if BOARD_HAS_PSRAM
+  switch (HighlightFile::load(bookPath, highlightDoc)) {
+    case HighlightFile::LoadResult::Loaded:
+    case HighlightFile::LoadResult::Empty:
+    case HighlightFile::LoadResult::RecoveredFromTemp:
+      highlightsLoaded = true;
+      break;
+    case HighlightFile::LoadResult::Failed:
+      // The file may still hold the user's data -- do not save over it, and
+      // say so once up front rather than only at the point a save is refused.
+      highlightsSaveDisabled = true;
+      ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
+      break;
+  }
+#endif
+
   return true;
 }
 
@@ -1408,7 +1429,38 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     renderer.clearScreen();
   }
 
+  // Computed once here and replayed after the B/W render below, never inside
+  // renderGrayscalePass: that lambda runs ~12 times per page turn (80-row
+  // strips x 2 planes), and invertRect is a no-op outside the B/W render mode
+  // anyway (GfxRenderer::invertRect), so walking the page there would only
+  // burn CPU. On pages with images, renderWithImagePlaceholders above already
+  // displayed a placeholder frame, so the highlight appears one frame late on
+  // those pages -- acceptable.
+  std::vector<VisibleRange> highlightRanges;
+  if (highlightsLoaded) {
+    for (const auto* entry : highlightDoc.findBySpine(static_cast<uint16_t>(currentSpineIndex))) {
+      highlightRanges.push_back(entry->range);  // value, never the pointer: addHighlight can reallocate
+    }
+  }
+  // TEMPORARY (removed in Task 4): a fixed range so the overlay can be seen on
+  // hardware before PassageSelectActivity exists to create real highlights.
+  highlightRanges.push_back(VisibleRange{page->visibleTextOffset, page->visibleTextOffset + 40});
+
+  const int highlightColumnRight = renderer.getScreenWidth() - orientedMarginRight;
+  const int highlightLineHeight = renderer.getLineHeight(fontId);
+  const int highlightAscender = renderer.getFontAscenderSize(fontId);
+  // A quarter line-height gap tolerance merges ordinary inter-word spacing
+  // without a fixed pixel value that would either under-merge at large font
+  // sizes or bridge a paragraph indent at small ones (see HighlightGeometry.h).
+  const int16_t highlightGapTolerance = static_cast<int16_t>(highlightLineHeight / 4);
+  const std::vector<HighlightRect> highlightRectsForPage = HighlightOverlay::buildRects(
+      *page, highlightRanges, orientedMarginLeft, orientedMarginTop, highlightColumnRight, highlightLineHeight,
+      highlightAscender, highlightGapTolerance);
+
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+  for (const auto& rect : highlightRectsForPage) {
+    renderer.invertRect(rect.x, rect.y, rect.w, rect.h);
+  }
   renderStatusBar();
   const auto tBwRender = millis();
 
