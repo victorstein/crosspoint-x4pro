@@ -6,58 +6,58 @@
 
 **Architecture:** `ParsedText` already computes per-word visible offsets at layout time and throws them away. This plan widens `TextBlock`'s arena to keep them, threads them through `extractLine` (respecting bidi visual reordering), and bumps the section cache format. No highlights code — this plan only makes the data available.
 
-**Tech Stack:** C++20, PlatformIO (`x4pro`), host CMake + GoogleTest.
+**Tech Stack:** C++20, PlatformIO, host CMake + GoogleTest.
 
 **Depends on:** `docs/superpowers/plans/2026-08-18-highlights-foundations.md` (complete).
 
-**Delivery:** fork-only. No upstream contribution, so the format bump and the RAM cost are ours to decide.
+**Delivery:** fork-only.
+
+> **v2 — revised after adversarial review.** The first draft justified its encoding with a
+> scenario that cannot occur, hand-waved the one function that actually has to change,
+> and contained a cache-corruption window between two tasks. All corrected below. Claims
+> are cited to `file:line`; where a claim could not be verified it is marked as such.
 
 ---
 
 ## Why this is needed
 
-`ParsedText.h:39-49` is explicit that the data exists and is deliberately discarded:
+`ParsedText.h:39-49` states the data exists and is deliberately discarded: *"rendered TextBlocks do not carry any of this metadata."* Only the line-start offset survives, into the page LUT (`ParsedText.cpp:1241`).
 
-```
-// Zero-based visible Unicode-codepoint offsets in the spine body, stored as
-// uint16_t deltas from a shared base to keep this layout-only metadata small.
-// Pathological spans wider than uint16_t use sparse rebases; rendered
-// TextBlocks do not carry any of this metadata.
-```
+Offsets **cannot be re-derived** at render time. `ChapterHtmlSlimParser.cpp:1147-1165` counts codepoints of body character data *before* the skip guards, so the offset space includes collapsed whitespace and some content layout never renders. Any independent recount diverges.
 
-Only the *line-start* offset survives, to populate the page LUT (`ParsedText.cpp:1241`). A highlight needs *word* granularity, and the offsets **cannot be re-derived** at render time: `ChapterHtmlSlimParser.cpp:1147-1165` counts codepoints of body character data *before* the skip guards, so the offset space includes collapsed whitespace and entire subtrees that layout never renders. Any independent recount diverges.
+## What review confirmed (do not re-litigate)
 
-## Two findings that make this smaller than feared
+- **Serialization is free.** `TextBlock::serialize` (`TextBlock.cpp:313-319`) writes the arena as one blob sized by `arenaSize()`; `deserialize` (`:345-384`) recomputes that size from the file-read scalars and does one bulk read, then `bindArenaPointers()`. Growing the arena propagates automatically. `arenaSize` has exactly three callers, all in `TextBlock.cpp` — no dumper, estimator, or test depends on the layout. `Page`/`Section` carry no block length prefixes.
+- **The partial-version constant is derived.** `SECTION_FILE_PARTIAL_VERSION = 0xFE - (SECTION_FILE_VERSION - 28)` (`Section.cpp:60`). Bumping is a one-constant change, and **no other cache version needs touching** — `CSS_CACHE_VERSION`, `BOOK_CACHE_VERSION`, the TXT reader's `CACHE_VERSION`, `CPFONT_VERSION` and `SIDECAR_VERSION` are all unrelated. Existing v40 partials carry `0xF2`, which matches neither new constant, so they are rejected and rebuilt.
+- **Arena base alignment is real, not luck.** `makeUniqueNoThrow<uint8_t[]>` is `new (std::nothrow) uint8_t[n]()` (`Memory.h:33`), which must return storage aligned for any fundamental type; `uint8_t` is trivially destructible so no array cookie shifts the pointer. No overridden `operator new` exists in the tree.
+- **The bidi indexing is correct.** `lastBreakAt` (`ParsedText.cpp:1239`) is a logical index into `words`; `visualOrderScratch[i]` is **line-relative** (`BidiUtils.cpp:199,286`), so `lastBreakAt + src` is right and does not double-count. `wordWidths[lastBreakAt + src]` (`:1338`) is a true parallel. Offset lockstep holds through every push, hyphenation insert, and prefix erase.
 
-**1. Serialization is free.** `TextBlock::serialize` writes the arena verbatim in one call:
+## Encoding decision: absolute `uint32`
 
-```cpp
-const size_t size = arenaSize(numWords, focusPresent, textBytes);
-if (file.write(arena.get(), size) != size) { ... }
-```
+We store an absolute `uint32_t` offset per word.
 
-The comment above it states the intent: *"its in-memory layout is exactly the on-disk layout ... so one write covers all per-word arrays and the text blob."* Adding an array to the arena therefore serialises and deserialises with no new I/O code — only `arenaSize()` and the view binding change.
+**The reason is simplicity, not overflow.** An earlier draft claimed a line-relative `uint16` delta could exceed 65535 because a nested table between two words inflates offsets. **That is unreachable:** `<table>` flattens into per-cell paragraphs (`ParsedText.cpp:535`, `startNewTextBlock(tableCellBlockStyle)`), so words either side of a nested table land in different `ParsedText` objects and can never share a line. The only genuinely inline counted-but-unrendered content is `display:none` (`ChapterHtmlSlimParser.cpp:491-496`) and `doc-pagebreak` labels (`:910-918`); overflowing a delta would need a hidden span of >65535 codepoints inside one rendered line.
 
-**2. The partial-version constant is derived, not manual.**
+The real argument: **`TextBlock` stores no base offset.** The line-start offset goes to the *page* LUT via `processLine`, never into the block. A delta scheme would therefore have to add a per-block `uint32` base to the arena anyway. For a 10-word line that is 24 B (base + 10×2) versus 40 B absolute — about 16 B per line, ~400 B per page — in exchange for rebase bookkeeping and a second failure mode. Not worth it.
 
-```cpp
-constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xFE - (SECTION_FILE_VERSION - 28);
-```
+**Alignment:** a `uint32_t` array needs 4-byte alignment, so it goes **first**, ahead of the 16-bit arrays. Note the target is **ESP32-S3, which is Xtensa LX7, not RISC-V** — the existing `TextBlock.h:19-21` comment was written for the C3. Xtensa also traps unaligned 32-bit access, so the mitigation stands; do not copy the RISC-V wording forward.
 
-`Section.cpp:60`, with the comment *"Derived so the pairing can't be forgotten."* Bumping `SECTION_FILE_VERSION` is a **one-constant change**. (The v2 spec implied two edits; it was wrong.)
+## Stated limit: NFC drift
 
-## Encoding decision: absolute `uint32`, not `uint16` deltas
+`ParsedText::addWord` NFC-composes a word (`ParsedText.cpp:399`) *before* deriving sub-token offsets (`:467`, `:512-532`), while `visibleTextOffset` was counted on the raw parse stream. For NFD source text — the comment at `:393-398` names Vietnamese and NFD headings as real cases — a word's stored offset drifts from the true spine-body offset by the marks composed away earlier in that token.
 
-`ParsedText` stores its layout-time copy as `uint16_t` deltas from a shared base with sparse rebases, because that metadata is transient and RAM-critical on the C3.
+This does **not** break re-pagination invariance: the drift is deterministic and identical at every width. But offsets are not exact spine-body codepoint offsets, and the consequence is a hard rule for the feature plan: **a highlight range must be recorded from these same stored offsets and never recomputed from source text.**
 
-For the persisted copy we take **absolute `uint32_t` per word** instead:
+## Costs
 
-- Offsets count skipped subtrees. A nested table or `skipUntilDepth` region between two words *on the same line* can push a line-relative delta past 65535. That is rare, but it is a silent wrong-anchor bug, not a crash — the worst kind.
-- Absolute offsets remove the rebase bookkeeping entirely; the render-time comparison is a plain `offset >= start && offset < end`.
-- Cost is 2 extra bytes per word over the delta scheme. A page holds ~25-30 blocks of ~10 words, so ~300 words → **~1.2 KB per page** absolute vs ~600 B delta. Negligible against 8 MB PSRAM.
-- We are fork-only and X4 Pro-targeted, so the C3 budget that motivated the delta scheme no longer binds us. The spec's "Delivery: fork" section explicitly permits choosing correctness first.
+- **RAM:** +4 B/word. ~10 words/line × ~28 lines ≈ 280 words/page → **~1.1 KB/page**. At most two pages are resident (current + prefetch, `EpubReaderActivity.cpp:277,309`; `loadPageAt` returns a `unique_ptr` with no page cache), so **~2.2 KB peak**.
+- **SD growth — the larger cost, and previously unstated.** Per-word arena is currently 5 B (`2+2+1`) plus NUL-terminated text. For Latin prose (~6 B/word incl. NUL) that is ~11 B/word, so +4 B is **~+36%** on the arena portion of every section `.bin`. CJK is worse: `cjkCharacterBreakByteOffsets` (`ParsedText.cpp:455`) tokenizes per ideograph, giving 3 text bytes + NUL + 5 = 9 B/token → **~+44%**, and a 500k-character CJK novel gains roughly **2 MB** of cache. There is no cache eviction or size cap (`Section.cpp:73`). Acceptable on an SD card, but it must be measured, not assumed.
 
-**Alignment constraint:** `TextBlock.h`'s arena comment warns *"2-byte alignment holds by construction: all 16-bit arrays come first and the arena base is allocator-aligned; RISC-V faults on unaligned multi-byte access."* A `uint32_t` array needs 4-byte alignment, so it must be placed **first**, ahead of the 16-bit arrays.
+## Open decision: the C3 build targets
+
+`platformio.ini:2` sets `default_envs = default`, and `[base]` at `:11` sets `board = esp32-c3-devkitm-1`. **Seven ESP32-C3 envs remain in the tree** (`default`, `gh_release`, `gh_release_rc`, `slim`, `sticky`, `sticky-gh_release`, `sticky-gh_release_rc`) and the default build is one of them.
+
+A +36–44% arena growth lands hardest on exactly the platform the delta scheme was designed for. This plan therefore verifies **both** `-e x4pro` and `-e default` at every build step. If this fork intends to abandon the C3, that decision should be recorded and the envs removed — but until it is, do not assume the C3 budget is irrelevant.
 
 ---
 
@@ -65,97 +65,104 @@ For the persisted copy we take **absolute `uint32_t` per word** instead:
 
 | File | Responsibility |
 | --- | --- |
-| `lib/Epub/Epub/blocks/TextBlock.h` / `.cpp` (modify) | Arena gains a `uint32_t visibleOffset[]` array, plus an accessor |
-| `lib/Epub/Epub/ParsedText.cpp` (modify) | `extractLine` populates offsets, handling bidi reorder |
-| `lib/Epub/Epub/Section.cpp` (modify) | `SECTION_FILE_VERSION` 40 → 41 + history comment |
-| `test/visible_offset/` (create) | Host tests for the pure offset-selection predicate |
-| `lib/Epub/Epub/VisibleRange.h` (create) | Dependency-free range predicate, host-testable |
+| `lib/Epub/Epub/blocks/TextBlock.h` / `.cpp` (modify) | Arena gains `uint32_t visibleOffset[]`; constructor takes it; accessor exposes it |
+| `lib/Epub/Epub/ParsedText.cpp` (modify) | `extractLine` supplies offsets, bidi-aware |
+| `lib/Epub/Epub/Section.cpp` (modify) | `SECTION_FILE_VERSION` 40 → 41 → 42, one bump per behaviour change |
+| `lib/Epub/Epub/VisibleRange.h` (create) | Dependency-free range predicate |
+| `test/visible_range/` (create) | Host tests for the predicate |
+| `docs/superpowers/notes/host-shim-feasibility.md` (create) | Task 1 output |
 
 ---
 
-### Task 1: Spike — decide whether a host shim is affordable
+### Task 1: Spike — cost the host shim honestly
 
-The v2 spec claims the critical repagination-invariance test needs a host shim for `GfxRenderer`/`Storage`. Nobody has costed that. Do so before committing to it.
+The spec asserts the repagination-invariance test needs a host shim for `GfxRenderer`/`Storage`. Nobody has costed it. **No production code in this task.** Output is a written decision.
 
-**No production code changes in this task.** Output is a written decision.
+Two facts review already established — start from them, do not re-derive:
 
-- [ ] **Step 1: Map the dependency closure**
+- `ParsedText` calls **six** renderer methods, not two: `getKerning` (8×), `getTextAdvanceX` (7×), `getSpaceAdvance` (7×), `getSpaceWidth` (2×), `isSdCardFont` (1×), `ensureSdCardFontReady` (1×).
+- **The method count is not the problem.** `GfxRenderer` has **no virtual functions** — there is no seam to inject a fake. A shim needs either a link-time substitute `GfxRenderer.cpp` or templating `ParsedText` on the renderer. And `GfxRenderer.h` includes `HalDisplay.h`, which includes `<Arduino.h>`, so merely *compiling* `ParsedText.cpp` on the host drags in the Arduino core.
 
-```bash
-cd ~/Documents/development/personal/crosspoint-x4pro
-head -20 lib/Epub/Epub/ParsedText.cpp lib/Epub/Epub/Section.cpp lib/Epub/Epub/Page.cpp
-grep -rn "renderer\." lib/Epub/Epub/ParsedText.cpp | head -30
-```
+- [ ] **Step 1: Measure the two candidate approaches**
 
-Identify precisely which `GfxRenderer` members `ParsedText` calls. The suspicion from earlier reading is that it is a small surface — mostly `getTextAdvanceX` and `getKerning` (font metrics), not drawing.
+For each of (a) link-time substitute `GfxRenderer.cpp` compiled only into the test target, and (b) templating `ParsedText` on a renderer concept, determine: how many files change, whether `Arduino.h` can be kept out of the host translation units, and what `Storage`/`HalStorage` still forces in via `Section.cpp`.
 
-- [ ] **Step 2: Decide and record**
+- [ ] **Step 2: Record the decision**
 
-Write findings to `docs/superpowers/notes/host-shim-feasibility.md`, answering:
+Write `docs/superpowers/notes/host-shim-feasibility.md` covering: the closure for each approach, which (if either) keeps Arduino out, an honest effort estimate, and a recommendation of **shim now / shim later / not worth it**.
 
-1. Exact list of `GfxRenderer` methods `ParsedText` needs.
-2. Whether a fake renderer returning fixed-width metrics (e.g. every glyph 10px) is enough to exercise pagination. **A fixed-width fake is sufficient for repagination invariance** — the test asserts that a recorded offset range resolves to the same *words* at two different widths, which needs deterministic metrics, not real ones.
-3. Whether `Storage`/`HalStorage` can be stubbed, or whether `Section`'s file I/O forces it out of scope.
-4. A recommendation: **shim now**, **shim later**, or **not worth it**.
+Do **not** pre-suppose the answer. If both approaches are large, "not worth it — verify anchoring on device instead" is a legitimate and probably correct outcome.
 
-- [ ] **Step 3: Commit the note**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add docs/superpowers/notes/host-shim-feasibility.md
 git commit -m "docs: cost the host test shim for pagination logic"
 ```
 
-**Escalate rather than guess** if the closure turns out to be large. This step exists to replace an assumption with a number.
-
 ---
 
 ### Task 2: `TextBlock` carries per-word visible offsets
 
-Land the storage first, populated with zeros. The build stays green and caches rebuild once; nothing reads the values yet.
+Land the storage and the constructor change together, populated with zeros. Bump to **41**.
 
 **Files:**
 - Modify: `lib/Epub/Epub/blocks/TextBlock.h`
 - Modify: `lib/Epub/Epub/blocks/TextBlock.cpp`
+- Modify: `lib/Epub/Epub/ParsedText.cpp` (call sites only)
 - Modify: `lib/Epub/Epub/Section.cpp`
 
 - [ ] **Step 1: Update the arena layout comment**
 
-In `TextBlock.h`, the arena layout block currently reads:
+In `TextBlock.h`, insert above the `textOff` line and amend the alignment note to say the 32-bit array comes first, then 16-bit, then 8-bit, then text. Replace the RISC-V wording — the S3 is Xtensa LX7.
 
 ```
+//   uint32_t visibleOffset[wordCount]  visible-codepoint offset of word i in the
+//                                      spine body; anchors highlights across
+//                                      re-pagination. First in the arena because
+//                                      it needs 4-byte alignment (Xtensa traps
+//                                      unaligned 32-bit access).
 //   uint16_t textOff[wordCount]        byte offset of word i's text in text[]
 ```
 
-Insert **above** it, and extend the alignment note:
+- [ ] **Step 2: Extend the constructor**
 
+`TextBlock.h:67-70`. Add the new vector as a **required** parameter, before the defaulted ones:
+
+```cpp
+  explicit TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
+                     const std::vector<EpdFontFamily::Style>& wordStyles, const std::vector<uint8_t>& focusBoundary,
+                     const std::vector<uint16_t>& focusSuffixX, const std::vector<uint32_t>& visibleOffsets,
+                     const BlockStyle& blockStyle = BlockStyle(), std::vector<std::string> rubyTexts = {});
 ```
-//   uint32_t visibleOffset[wordCount]  visible-codepoint offset of word i in
-//                                      the spine body; anchors highlights across
-//                                      re-pagination. Absolute, not a delta:
-//                                      offsets include content layout skips, so a
-//                                      line-relative delta can exceed 16 bits.
-//   uint16_t textOff[wordCount]        byte offset of word i's text in text[]
-```
 
-and amend the alignment sentence to say the 32-bit array comes first, then the 16-bit arrays, then the 8-bit arrays, then text.
-
-- [ ] **Step 2: Add the member, view, and accessor**
-
-Add alongside the other typed views:
+Add the view member beside the others:
 
 ```cpp
   const uint32_t* visibleOffsetArr = nullptr;
 ```
 
-Add a public accessor next to the other per-word accessors (`wordText`, `wordXpos`, …):
+and the public accessor beside `wordText`/`wordXpos`:
 
 ```cpp
-  // Visible-codepoint offset of word i within the spine body. Absolute; comparable
+  // Visible-codepoint offset of word i within the spine body. Absolute, comparable
   // against a stored highlight range. Returns 0 for out-of-range i.
   uint32_t wordVisibleOffset(uint16_t i) const;
 ```
 
-- [ ] **Step 3: Update `arenaSize`**
+- [ ] **Step 3: Extend the size guard**
+
+`TextBlock.cpp:57-58`. This check is what stands between a caller bug and an out-of-bounds arena write, so the new vector **must** be in it:
+
+```cpp
+  if (words.size() != wordXpos.size() || words.size() != wordStyles.size() ||
+      words.size() != visibleOffsets.size() || words.size() > 10000 ||
+      (hasFocus && (words.size() != focusBoundary.size() || words.size() != focusSuffixX.size()))) {
+```
+
+Add `visibleOffsets.size()` to the `LOG_ERR` argument list too.
+
+- [ ] **Step 4: Update `arenaSize`**
 
 ```cpp
 size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasFocus, const uint16_t textBytes) {
@@ -170,9 +177,39 @@ size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasFocus, const
 }
 ```
 
-- [ ] **Step 4: Bind the view and implement the accessor**
+- [ ] **Step 5: Update `bindArenaPointers`**
 
-Find where the other views are bound after the arena is filled (search for `textOffArr =`). The `visibleOffsetArr` binds at arena offset 0, and every subsequent base shifts by `wordCount * sizeof(uint32_t)`. Update all of them.
+`TextBlock.cpp:22-39` uses hard-coded byte multipliers; **every one shifts**:
+
+```cpp
+void TextBlock::bindArenaPointers() {
+  uint8_t* base = arena.get();
+  const size_t wc = numWords;
+  visibleOffsetArr = reinterpret_cast<const uint32_t*>(base);
+  textOffArr = reinterpret_cast<const uint16_t*>(base + wc * 4);
+  xposArr = reinterpret_cast<const int16_t*>(base + wc * 6);
+  size_t off = wc * 8;
+  if (focusPresent) {
+    focusSuffixXArr = reinterpret_cast<const uint16_t*>(base + off);
+    off += wc * 2;
+  }
+  stylesArr = base + off;
+  off += wc;
+  if (focusPresent) {
+    focusBoundaryArr = base + off;
+    off += wc;
+  }
+  textArr = reinterpret_cast<const char*>(base + off);
+}
+```
+
+- [ ] **Step 6: Copy the offsets into the arena and implement the accessor**
+
+In the constructor's arena-fill (`TextBlock.cpp:41-120`), write `visibleOffsets[i]` into the `uint32_t` region alongside the existing per-word copies.
+
+> The arena is already zero-filled — `makeUniqueNoThrow` value-initializes (`Memory.h:33`,
+> note the trailing `()`), so an explicit zero pass is unnecessary. Task 2 passes a
+> zero-filled vector from the call sites instead, which the size guard then validates.
 
 ```cpp
 uint32_t TextBlock::wordVisibleOffset(const uint16_t i) const {
@@ -181,42 +218,40 @@ uint32_t TextBlock::wordVisibleOffset(const uint16_t i) const {
 }
 ```
 
-- [ ] **Step 5: Zero-fill at construction**
+- [ ] **Step 7: Update both call sites with a zero vector**
 
-Wherever the arena is populated, write `0` into every `visibleOffset[i]` for now. Task 3 replaces this with real values. Do not leave the array uninitialised — a stale-heap value would look like a plausible offset.
+`ParsedText.cpp:1549-1550` (no-focus fast path) and `:1572-1573` (focus path) construct `TextBlock` positionally. Pass a correctly-sized zero-filled `std::vector<uint32_t>` at the new position in both. Task 3 replaces it with real values.
 
-- [ ] **Step 6: Bump the section format**
+- [ ] **Step 8: Bump the section format to 41**
 
-In `Section.cpp`, above `constexpr uint8_t SECTION_FILE_VERSION`, add a history line matching the existing style:
+In `Section.cpp`, above the constant, add a history line in the existing style, then set it to `41`. Leave `SECTION_FILE_PARTIAL_VERSION` alone — it is derived.
 
 ```cpp
-// v41: TextBlock's arena carries a per-word visible-codepoint offset array, used
-//      to anchor highlights across re-pagination. Older caches have no such array
-//      and would be misread as having one.
+// v41: TextBlock's arena carries a per-word visible-codepoint offset array. The
+//      array is present but zero-valued at this version; v42 populates it.
 ```
 
-and change the constant to `41`. **Do not touch `SECTION_FILE_PARTIAL_VERSION`** — it is derived and updates itself.
-
-- [ ] **Step 7: Verify**
+- [ ] **Step 9: Verify both boards**
 
 ```bash
 pio run -e x4pro
+pio run -e default
 cmake --build build/test && ctest --test-dir build/test -j
 ```
 
-Expected: firmware `SUCCESS`; host suite still 152/152 (nothing here is host-testable yet). Record the flash/RAM figures — flash was 84.6% before this plan.
+Expected: both firmware builds `SUCCESS`; host suite unchanged at 152/152. Record flash and RAM for **both** envs — the C3 (`default`) is the one at risk from arena growth.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
-git add lib/Epub/Epub/blocks/TextBlock.h lib/Epub/Epub/blocks/TextBlock.cpp lib/Epub/Epub/Section.cpp
+git add lib/Epub/Epub/blocks/TextBlock.h lib/Epub/Epub/blocks/TextBlock.cpp lib/Epub/Epub/ParsedText.cpp lib/Epub/Epub/Section.cpp
 git commit -m "feat(epub): reserve per-word visible offsets in the TextBlock arena
 
-Widens the arena with a uint32 visible-codepoint offset per word and
-bumps SECTION_FILE_VERSION to 41. Values are zero for now; ParsedText
-populates them next. Absolute rather than delta-encoded because offsets
-include layout-skipped content, so a line-relative delta can exceed 16
-bits."
+Widens the arena with a uint32 offset per word, extends the constructor
+and its size guard, and bumps SECTION_FILE_VERSION to 41. Values are
+zero at this version; v42 populates them. Absolute rather than delta
+encoded because TextBlock stores no base offset, so a delta scheme would
+have to add one anyway."
 ```
 
 ---
@@ -224,118 +259,93 @@ bits."
 ### Task 3: `ParsedText` populates the offsets
 
 **Files:**
-- Modify: `lib/Epub/Epub/ParsedText.cpp` (`extractLine`, around lines 1233-1400)
+- Modify: `lib/Epub/Epub/ParsedText.cpp`
+- Modify: `lib/Epub/Epub/Section.cpp`
 
-`ParsedText::visibleOffsetAt(wordIndex)` already returns the absolute offset for a **logical** word index. The line being extracted starts at logical index `lastBreakAt`, so word `i` of the line is `visibleOffsetAt(lastBreakAt + i)`.
+`visibleOffsetAt(wordIndex)` returns the absolute offset for a **logical** index. Line word `i` is logical `lastBreakAt + i`.
 
-**The bidi trap:** when `willReorder` is true, the block is built from `reorderedWordsScratch` in **visual** order. Offsets must follow the same permutation, or an RTL line anchors every highlight to the wrong words. The existing code already shows the correct pattern for exactly this — note how widths are handled:
+**The bidi trap:** when `willReorder` is true the block is built in **visual** order, so offsets must follow the same permutation or every RTL line anchors to mirrored words.
 
-```cpp
-const uint16_t src = visualOrderScratch[i];
-reorderedWordsScratch.push_back(std::move(lineWords[src]));
-reorderedWidthsScratch.push_back(wordWidths[lastBreakAt + src]);
-```
-
-- [ ] **Step 1: Add the scratch vector**
-
-Beside the other `reordered*Scratch` members in `ParsedText.h`:
+**Do not add a scratch vector.** When `willReorder` is false there is no parallel array construction at all — `lineWords` is used directly (`ParsedText.cpp:1259-1266`), and the `else` branch at `:1445-1531` only computes `lineXPos`. The codebase already has the idiom for exactly this case, immediately below the branch at `:1533-1535`:
 
 ```cpp
-  std::vector<uint32_t> reorderedVisibleOffsetsScratch;
+const auto focusBoundaryAt = [&](const size_t idx) {
+  return willReorder ? reorderedFocusBoundaryScratch[idx] : wordFocusBoundary[lastBreakAt + idx];
+};
 ```
 
-- [ ] **Step 2: Populate it in the reorder path**
+- [ ] **Step 1: Add the parallel lambda**
 
-Inside the `if (willReorder)` block, alongside the existing `reserve` calls:
+Beside `focusBoundaryAt`:
 
 ```cpp
-    reorderedVisibleOffsetsScratch.clear();
-    reorderedVisibleOffsetsScratch.reserve(visualOrderScratch.size());
+const auto visibleOffsetForLineWord = [&](const size_t idx) {
+  return visibleOffsetAt(lastBreakAt + (willReorder ? visualOrderScratch[idx] : idx));
+};
 ```
 
-and inside the loop, next to the width push:
+`visualOrderScratch` is still live here — the swap at `:1443-1444` moves `reorderedWordsScratch` into `lineWords` but leaves `visualOrderScratch` untouched.
+
+- [ ] **Step 2: Build the vector at each construction site**
+
+Immediately before each `make_shared<TextBlock>` (`:1549-1550` and `:1572-1573`), replace Task 2's zero vector with real values:
 
 ```cpp
-      reorderedVisibleOffsetsScratch.push_back(visibleOffsetAt(lastBreakAt + src));
+std::vector<uint32_t> lineVisibleOffsets;
+lineVisibleOffsets.reserve(lineWordCount);
+for (size_t i = 0; i < lineWordCount; ++i) {
+  lineVisibleOffsets.push_back(visibleOffsetForLineWord(i));
+}
 ```
 
-- [ ] **Step 3: Populate the non-reorder path**
+`lineWordCount` is the right bound: `BidiUtils::computeVisualWordOrder` returns false unless `visualOrder.size() == nWords` (`BidiUtils.cpp:290-293`), so when `willReorder` is true the two are equal.
 
-In the branch where `willReorder` is false, build the same vector in logical order:
+- [ ] **Step 3: Bump the section format to 42**
+
+This is a **separate behaviour change** and needs its own version, or a v41 cache full of zeros is indistinguishable from a populated one and silently anchors every highlight to chapter start.
 
 ```cpp
-    reorderedVisibleOffsetsScratch.clear();
-    reorderedVisibleOffsetsScratch.reserve(lineWordCount);
-    for (size_t i = 0; i < lineWordCount; ++i) {
-      reorderedVisibleOffsetsScratch.push_back(visibleOffsetAt(lastBreakAt + i));
-    }
+// v42: the per-word visible-offset array introduced in v41 is now populated.
+//      A v41 cache carries the array but all zeros, which would resolve every
+//      highlight to the chapter start.
 ```
 
-Read the surrounding code first: if the non-reorder path passes `lineWords` directly rather than a reordered copy, mirror whatever mechanism it uses to hand per-word arrays to the `TextBlock` builder. **If the two paths differ structurally, report it before implementing** rather than forcing a shape that does not fit.
+Set `SECTION_FILE_VERSION = 42`.
 
-- [ ] **Step 4: Pass the offsets into the block**
-
-Thread `reorderedVisibleOffsetsScratch` into whichever function fills the arena (the same one that receives styles, widths, and focus boundaries), and write each value into `visibleOffset[i]` in place of Task 2's zero fill.
-
-- [ ] **Step 5: Verify**
+- [ ] **Step 4: Verify both boards**
 
 ```bash
 pio run -e x4pro
+pio run -e default
 ```
 
-Expected: `SUCCESS`.
+Expected: both `SUCCESS`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add lib/Epub/Epub/ParsedText.h lib/Epub/Epub/ParsedText.cpp
+git add lib/Epub/Epub/ParsedText.cpp lib/Epub/Epub/Section.cpp
 git commit -m "feat(epub): populate per-word visible offsets, bidi-aware
 
-Offsets follow the same visual permutation as words, styles and widths,
-so an RTL line anchors to the correct words rather than mirrored ones."
+Offsets follow the same visual permutation as words and styles via a
+lambda matching the existing focusBoundaryAt idiom, so an RTL line
+anchors to the correct words. Bumps SECTION_FILE_VERSION to 42 so a
+v41 cache of zero offsets is never mistaken for a populated one."
 ```
 
 ---
 
 ### Task 4: Host-testable range predicate
 
-The comparison a highlight renderer performs is pure logic and belongs in its own dependency-free header, so it can be tested on the host regardless of Task 1's shim decision.
+The comparison a highlight renderer performs is pure logic and belongs in its own dependency-free header, testable regardless of Task 1's outcome.
 
 **Files:**
-- Create: `lib/Epub/Epub/VisibleRange.h`
 - Create: `test/visible_range/VisibleRangeTest.cpp`
 - Create: `test/visible_range/CMakeLists.txt`
 - Modify: `test/CMakeLists.txt`
+- Create: `lib/Epub/Epub/VisibleRange.h`
 
-- [ ] **Step 1: Write the header**
-
-```cpp
-// lib/Epub/Epub/VisibleRange.h
-#pragma once
-
-#include <cstdint>
-
-// A half-open range of visible-codepoint offsets within one spine item, as stored
-// by a highlight. Dependency-free so the selection rule can be unit tested on the
-// host, away from the renderer and storage layers.
-struct VisibleRange {
-  uint32_t start = 0;
-  uint32_t end = 0;  // exclusive
-
-  constexpr bool isEmpty() const { return end <= start; }
-
-  // True when a word at `offset` falls inside the range. Half-open so two
-  // adjacent highlights cannot both claim the same word.
-  constexpr bool contains(const uint32_t offset) const { return offset >= start && offset < end; }
-
-  // True when this range and `other` share at least one offset.
-  constexpr bool overlaps(const VisibleRange& other) const {
-    return !isEmpty() && !other.isEmpty() && start < other.end && other.start < end;
-  }
-};
-```
-
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 1: Write the failing test first**
 
 ```cpp
 // test/visible_range/VisibleRangeTest.cpp
@@ -382,15 +392,15 @@ TEST(VisibleRange, DetectsGenuineOverlap) {
 }
 
 TEST(VisibleRange, HandlesOffsetsBeyond16Bits) {
-  // Offsets count layout-skipped content, so they routinely exceed 65535 in a
-  // long chapter. This is why the stored form is uint32, not a uint16 delta.
+  // Absolute spine-body offsets routinely exceed 65535 in a long chapter, which
+  // is why the stored form is 32-bit.
   constexpr VisibleRange r{70000, 70010};
   EXPECT_TRUE(r.contains(70005));
   EXPECT_FALSE(r.contains(65535));
 }
 ```
 
-- [ ] **Step 3: Register the suite**
+- [ ] **Step 2: Register the suite**
 
 ```cmake
 # test/visible_range/CMakeLists.txt
@@ -416,14 +426,41 @@ Add to `test/CMakeLists.txt`:
 add_subdirectory(visible_range)
 ```
 
-- [ ] **Step 4: Run to verify it fails**
+- [ ] **Step 3: Run to verify it fails**
 
 ```bash
 cmake -S test -B build/test
 cmake --build build/test --target VisibleRangeTest
 ```
 
-Expected: FAIL — `Epub/VisibleRange.h` not found until Step 1's file exists.
+Expected: FAIL with `Epub/VisibleRange.h` not found. The header does not exist yet — that is the red state.
+
+- [ ] **Step 4: Write the header**
+
+```cpp
+// lib/Epub/Epub/VisibleRange.h
+#pragma once
+
+#include <cstdint>
+
+// A half-open range of visible-codepoint offsets within one spine item, as stored
+// by a highlight. Dependency-free so the selection rule can be unit tested on the
+// host, away from the renderer and storage layers.
+struct VisibleRange {
+  uint32_t start = 0;
+  uint32_t end = 0;  // exclusive
+
+  constexpr bool isEmpty() const { return end <= start; }
+
+  // True when a word at `offset` falls inside the range. Half-open so two
+  // adjacent highlights cannot both claim the same word.
+  constexpr bool contains(const uint32_t offset) const { return offset >= start && offset < end; }
+
+  constexpr bool overlaps(const VisibleRange& other) const {
+    return !isEmpty() && !other.isEmpty() && start < other.end && other.start < end;
+  }
+};
+```
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -445,30 +482,31 @@ git commit -m "feat(epub): add host-tested visible-offset range predicate"
 
 ### Task 5: Verification and cache-invalidation check
 
-- [ ] **Step 1: Full suite and firmware**
+- [ ] **Step 1: Full suite and both firmware targets**
 
 ```bash
 cmake --build build/test && ctest --test-dir build/test -j
 pio run -e x4pro
+pio run -e default
 ```
 
-Expected: 158/158 host tests (152 + 6 new); firmware `SUCCESS`.
+Expected: 158/158 host tests (152 + 6); both firmware builds `SUCCESS`.
 
 - [ ] **Step 2: Record the cost**
 
-Note flash and RAM against the 84.6% / 19.7% baseline from the foundations branch. The arena grew by 4 bytes per word, so a RAM increase during reading is expected and correct — confirm it is proportionate, not alarming.
+Report flash and RAM for both envs. Baselines measured on the foundations branch in this session were `x4pro` flash 84.6% / RAM 19.7%; no `default` baseline was recorded, so capture one before Task 2 if you want a delta.
 
-- [ ] **Step 3: On-device sanity check (required — this is the first testable behaviour)**
+Also measure **SD growth**: build the section cache for one Latin book and one CJK book before and after, and record the actual percentage against the ~36% / ~44% estimates above.
 
-Flash the build and confirm:
+- [ ] **Step 3: On-device check (required — first observable behaviour)**
 
-1. An existing book **re-paginates once** on first open (the v41 bump invalidated its cache) and then opens instantly on subsequent loads.
+Flash `x4pro` and confirm:
+
+1. An existing book **re-paginates once** on first open (the version bump invalidated its cache), then opens instantly thereafter.
 2. Page navigation, chapter jumps, and go-to-percent still land correctly — the page LUT is built from the same offset machinery.
-3. No visible regression in justified or RTL text.
+3. No regression in justified text, and none in RTL if you have an RTL EPUB. RTL is where a permutation bug would show.
 
-Record the results. This is the first point at which the format change is observable, and the cache invalidation is the user-visible cost of the whole plan.
-
-- [ ] **Step 4: Commit any notes**
+- [ ] **Step 4: Commit notes**
 
 ```bash
 git add docs/
@@ -479,16 +517,19 @@ git commit -m "docs: record anchoring verification results"
 
 ## What this plan deliberately does not do
 
-- **No highlights.** No file format, activity, or render pass. That is the feature plan.
-- **No reading of the offsets.** `wordVisibleOffset` and `VisibleRange` are added and tested but unused in production — the same deliberate dead surface pattern as the foundations branch. The feature plan consumes both.
-- **No host shim.** Task 1 decides whether to build one; it does not build it.
+- **No highlights.** No file format, activity, or render pass.
+- **No reading of the offsets.** `wordVisibleOffset` and `VisibleRange` are added and tested but unused in production, the same deliberate dead surface as the foundations branch.
+- **No host shim.** Task 1 decides whether one is affordable; it does not build one.
 
 ## Risks
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Bidi permutation applied to words but not offsets | High | Task 3 mirrors the existing width-reorder line exactly; RTL is the review focus |
-| Arena alignment broken by the uint32 array | High | Placed first, ahead of the 16-bit arrays; RISC-V faults on misalignment so a mistake shows immediately |
-| Cache invalidation surprises the user | Medium | Expected and one-time; verified in Task 5 Step 3 |
-| Offsets wrong in ways only real EPUBs show | Medium | Task 1 decides whether a host shim can catch this before hardware |
-| Flash headroom (84.6% before this plan) | Medium | Measure each task; the arena change is RAM, not flash |
+| Bidi permutation applied to words but not offsets | High | Task 3 mirrors the existing `focusBoundaryAt` idiom; RTL is the review focus |
+| A v41 cache of zero offsets read as populated | High | Separate bumps: 41 in Task 2, 42 in Task 3 |
+| Constructor size guard not extended | High | Task 2 Step 3; without it a length bug writes past the arena |
+| `bindArenaPointers` multipliers missed | High | Every one shifts; Task 2 Step 5 gives the full function |
+| Arena growth regresses the C3 | Medium | Both envs built at every step; C3 decision recorded as open |
+| SD cache growth on long CJK books (~2 MB) | Medium | Measured in Task 5 Step 2 rather than assumed |
+| NFC drift makes offsets inexact for NFD text | Medium | Documented above; ranges must be recorded from stored offsets, never recomputed |
+| Cache invalidation surprises the user | Low | One-time, expected, verified in Task 5 Step 3 |
