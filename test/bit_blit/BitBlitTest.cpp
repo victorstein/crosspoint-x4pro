@@ -43,6 +43,30 @@ TEST(BitBlit, InvertsARangeSpanningThreeBytes) {
   EXPECT_EQ(buf[3], 0x00);
 }
 
+TEST(BitBlit, InvertsARangeSpanningExactlyTwoBytes) {
+  auto buf = makeBuf(0x00);
+  // Pixels 6..9: tail of byte 0 (bits 1,0), head of byte 1 (bits 7,6).
+  bitblit::invertRect(buf.data(), kStride, 6, 0, 9, 0);
+  EXPECT_EQ(buf[0], 0x03);
+  EXPECT_EQ(buf[1], 0xC0);
+}
+
+TEST(BitBlit, InvertsAFullByteAlignedToItsEdges) {
+  auto buf = makeBuf(0x00);
+  bitblit::invertRect(buf.data(), kStride, 8, 0, 15, 0);
+  EXPECT_EQ(buf[1], 0xFF);
+}
+
+TEST(BitBlit, InvertsAFullRowWidth) {
+  auto buf = makeBuf(0x00);
+  bitblit::invertRect(buf.data(), kStride, 0, 0, 31, 0);
+  EXPECT_EQ(buf[0], 0xFF);
+  EXPECT_EQ(buf[1], 0xFF);
+  EXPECT_EQ(buf[2], 0xFF);
+  EXPECT_EQ(buf[3], 0xFF);
+  EXPECT_EQ(buf[kStride], 0x00) << "row 1 untouched";
+}
+
 TEST(BitBlit, OnlyTouchesRowsInRange) {
   auto buf = makeBuf(0x00);
   bitblit::invertRect(buf.data(), kStride, 0, 1, 31, 2);

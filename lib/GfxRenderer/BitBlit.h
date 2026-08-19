@@ -1,4 +1,3 @@
-// lib/GfxRenderer/BitBlit.h
 #pragma once
 
 #include <cstdint>
@@ -11,7 +10,8 @@ namespace bitblit {
 
 // Flips every bit in the inclusive pixel range [x0, x1] on each row in [y0, y1].
 // Coordinates are physical framebuffer coordinates and MUST already be clipped:
-// out-of-range input writes out of bounds.
+// out-of-range input writes out of bounds. x0 and y0 must be >= 0, and stride
+// must be positive — a negative stride would silently walk rows backward.
 void invertRect(uint8_t* buf, int32_t stride, int x0, int y0, int x1, int y1);
 
 }  // namespace bitblit

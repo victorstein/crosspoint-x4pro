@@ -17,6 +17,7 @@ void invertRect(uint8_t* buf, const int32_t stride, const int x0, const int y0, 
       continue;
     }
     row[byteStart] ^= headMask;
+    // No memset-equivalent exists for XOR; highlight spans are narrow, so a scalar loop is fine.
     for (int b = byteStart + 1; b < byteEnd; b++) {
       row[b] ^= 0xFFu;
     }
