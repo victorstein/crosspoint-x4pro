@@ -55,7 +55,12 @@ This does **not** break re-pagination invariance: the drift is deterministic and
 
 ## Open decision: the C3 build targets
 
-`platformio.ini:2` sets `default_envs = default`, and `[base]` at `:11` sets `board = esp32-c3-devkitm-1`. **Seven ESP32-C3 envs remain in the tree** (`default`, `gh_release`, `gh_release_rc`, `slim`, `sticky`, `sticky-gh_release`, `sticky-gh_release_rc`) and the default build is one of them.
+`platformio.ini:2` sets `default_envs = default`, and `[base]` at `:11` sets `board = esp32-c3-devkitm-1`. **Four ESP32-C3 envs remain in the tree** — `default`, `gh_release`, `gh_release_rc`, `slim` — and the default build is one of them.
+
+> Earlier review claimed seven C3 envs, counting the three `sticky` targets. That is wrong:
+> `sticky`, `sticky-gh_release` and `sticky-gh_release_rc` each override
+> `board = esp32-s3-devkitc1-n16r8`, so they are S3. Verified per-env rather than inferred
+> from `[base]`.
 
 A +36–44% arena growth lands hardest on exactly the platform the delta scheme was designed for. This plan therefore verifies **both** `-e x4pro` and `-e default` at every build step. If this fork intends to abandon the C3, that decision should be recorded and the envs removed — but until it is, do not assume the C3 budget is irrelevant.
 
