@@ -242,6 +242,11 @@ class GfxRenderer {
   void maskRoundedRectOutsideCorners(int x, int y, int width, int height, int radius, Color color = Color::White) const;
   void fillRect(int x, int y, int width, int height, bool state = true) const;
   void fillRectDither(int x, int y, int width, int height, Color color) const;
+  // Flips every pixel in the rect. On a 1bpp panel this turns black text on a
+  // white ground into white text on black without reloading or redrawing any
+  // glyphs — unlike the fill-then-redraw-white approach in
+  // DictionaryWordSelectActivity, which pays an SD glyph load per word.
+  void invertRect(int x, int y, int width, int height) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, Color color) const;
   void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, bool roundTopLeft, bool roundTopRight,
                        bool roundBottomLeft, bool roundBottomRight, Color color) const;
