@@ -30,7 +30,11 @@ void PassageSelectActivity::onEnter() {
   }
 
   fontId = SETTINGS.getReaderFontId();
-  lineHeight = renderer.getLineHeight(fontId);
+  // Must match the compressed pitch ChapterHtmlSlimParser used to advance yPos
+  // between lines, not the uncompressed font metric -- otherwise the overlay
+  // rect (and everything else derived from lineHeight here) disagrees with
+  // the actual row pitch, and invertRect's XOR double-flips the overlap band.
+  lineHeight = renderer.getLineHeight(fontId, SETTINGS.getReaderLineCompression());
   ascender = renderer.getFontAscenderSize(fontId);
   gapTolerance = static_cast<int16_t>(lineHeight / 4);
 

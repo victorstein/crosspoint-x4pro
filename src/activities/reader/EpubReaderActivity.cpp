@@ -1538,7 +1538,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   }
 
   const int highlightColumnRight = renderer.getScreenWidth() - orientedMarginRight;
-  const int highlightLineHeight = renderer.getLineHeight(fontId);
+  // Must match the compressed pitch ChapterHtmlSlimParser used to advance yPos
+  // between lines, not the uncompressed font metric -- otherwise the overlay
+  // rect is taller (compression < 1) or shorter (compression > 1) than the
+  // actual row pitch, and invertRect's XOR double-flips the overlap band.
+  const int highlightLineHeight = renderer.getLineHeight(fontId, SETTINGS.getReaderLineCompression());
   const int highlightAscender = renderer.getFontAscenderSize(fontId);
   // A quarter line-height gap tolerance merges ordinary inter-word spacing
   // without a fixed pixel value that would either under-merge at large font
