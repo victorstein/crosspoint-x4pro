@@ -294,3 +294,48 @@ Concretely:
 Do **not** template `ParsedText` (approach (b)): it touches production headers,
 adds ~4 minutes to a full 13-env matrix build, carries unquantified `-Os`
 inlining risk on the flash-tight C3, and delivers nothing approach (a) does not.
+
+---
+
+## Outcome (added after the shim was built)
+
+The shim was built and the suite landed as `test/pagination/`. Actuals against
+the estimates above:
+
+| Estimate | Actual |
+| --- | --- |
+| stub headers, 26 lines | 3 files, 62 lines (comments carry the "why") |
+| fake renderer, ~30 lines | 132 lines, 16 symbols (comments again) |
+| 9 repo sources, 2 new to host | exactly as predicted, no source edits |
+| "half a day, and that is generous" | held |
+| zero production files change | held — `git diff lib src` is empty |
+
+Clean rebuild of the whole host suite: 7.9 s. Full run: **166/166 in 0.06 s**
+(158 before, 8 new).
+
+**Correction to point 3 above.** The spike observed that `processLine` reports
+only the line's first-word offset, and treated that as a constraint on what the
+suite could assert. Commits `5256f0c7` / `f278264c` changed this: `TextBlock`'s
+arena now carries a `uint32_t visibleOffset[]` per word with a public
+`wordVisibleOffset(i)` accessor. The suite therefore asserts at **word**
+granularity, not line granularity.
+
+**Point 4 held, but the guard against it was initially too weak.** The first
+version of the anti-vacuity check varied font size and viewport together, so
+replacing the fake's `advanceFor` with a constant still passed — the viewport
+change alone kept moving the line breaks. The guard now holds the viewport
+fixed so font size is the only variable, and it catches the constant-advance
+mutant. This is worth remembering: a test that guards against vacuity must
+itself be checked for vacuity.
+
+**No production bug was found.** The anchoring layer in `5256f0c7` / `f278264c`
+is correct on every case exercised, including bidi. Three deliberate mutations
+were injected and each was caught: indexing the logical array with a visual
+index (caught only by the RTL tests, exactly as predicted); a one-off in the
+hyphen remainder offset; and the constant-advance fake.
+
+**Two facts the spike had wrong**, both discovered by the suite failing first:
+words split even when hyphenation is disabled (a word wider than the column has
+to break somewhere), and a single word can split more than once. Both are
+correct behaviour; the assertions were rewritten to model fragments as a chain,
+which made them stronger than the original whole-word equality check.
