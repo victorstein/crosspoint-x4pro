@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, PlatformIO (ESP32-S3 / `x4pro` env), ArduinoJson 7.4.2, host-side CMake + GoogleTest 1.17.
 
-**Upstream note:** Tasks 3, 4, and 5 fix real bugs affecting all devices and are independent of highlights. Offer them upstream as standalone PRs.
+**No upstream.** This work stays on the local fork. Tasks 3, 4, and 5 do fix real bugs that affect every device and are independent of highlights, but they are not being offered upstream — keep them here and do not shape future work around upstream reviewability.
 
 ---
 

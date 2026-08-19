@@ -388,13 +388,18 @@ Consequences of forking, which the plan must account for:
 - **We can target the X4 Pro specifically.** The per-word offset cost no longer has to fit
   the C3's budget, so the encoding can be chosen for correctness first — though reusing
   `ParsedText`'s uint16_t-delta scheme is still the right default.
-- **Upstream drift is now a standing cost.** `master` moves (it changed the day this spec
-  was written). Rebase regularly and keep our changes in identifiable commits.
-- **The prerequisite fixes are worth upstreaming separately.** The unclamped menu loops
-  (`EpubReaderMenuActivity.cpp:176,191`) are a real out-of-bounds write affecting every
-  device, and the non-atomic save path is a genuine data-loss bug. Both are small,
-  uncontroversial, and independent of this feature — send them upstream as standalone
-  fixes rather than burying them in a fork.
+- **Upstream drift is now a standing cost.** `upstream/develop` moves (it changed the day
+  this spec was written). Rebase against **`upstream/develop`, not `upstream/master`** —
+  `master` is stale and does not even contain the commit this fork was taken from. Keep our
+  changes in identifiable commits so a rebase stays tractable.
+- **Nothing goes upstream.** Decided: the work stays on this fork. The prerequisite fixes
+  are genuine device-independent bugs — the unclamped menu loops were a real out-of-bounds
+  write, and the non-atomic save path a real data-loss bug — but they are not being
+  contributed back. Do not shape the code around upstream reviewability, and do not keep
+  changes artificially separable for that reason.
+- **Fork-only removes a constraint on the format bump.** With no upstream review to satisfy,
+  `SECTION_FILE_VERSION` and the `TextBlock` layout can be chosen for correctness on the
+  X4 Pro rather than negotiated against the C3's budget.
 
 ## Deferred: SSH terminal
 
