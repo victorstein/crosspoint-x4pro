@@ -1,5 +1,8 @@
 #include "Utf8.h"
 
+#include <algorithm>
+#include <cctype>
+
 #include "Utf8ComposeTable.h"
 
 namespace {
@@ -177,4 +180,25 @@ void utf8TruncateChars(std::string& str, const size_t numChars) {
   for (size_t i = 0; i < numChars && !str.empty(); ++i) {
     utf8RemoveLastChar(str);
   }
+}
+
+std::string utf8SafeSummary(std::string passage) {
+  passage.erase(std::unique(passage.begin(), passage.end(),
+                             [](const char a, const char b) {
+                               return std::isspace(static_cast<unsigned char>(a)) &&
+                                      std::isspace(static_cast<unsigned char>(b));
+                             }),
+                passage.end());
+  passage.erase(std::remove(passage.begin(), passage.end(), '\n'), passage.end());
+  passage.erase(passage.begin(), std::find_if(passage.begin(), passage.end(), [](const unsigned char ch) {
+                  return !std::isspace(ch);
+                }));
+  passage.erase(std::find_if(passage.rbegin(), passage.rend(),
+                              [](const unsigned char ch) { return !std::isspace(ch); })
+                    .base(),
+                passage.end());
+  if (passage.size() > 72) {
+    passage.resize(static_cast<size_t>(utf8SafeTruncateBuffer(passage.data(), 72)));
+  }
+  return passage;
 }
