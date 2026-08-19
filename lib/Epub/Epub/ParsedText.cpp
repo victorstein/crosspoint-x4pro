@@ -1534,6 +1534,10 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     return willReorder ? reorderedFocusBoundaryScratch[idx] : wordFocusBoundary[lastBreakAt + idx];
   };
 
+  const auto visibleOffsetForLineWord = [&](const size_t idx) {
+    return visibleOffsetAt(lastBreakAt + (willReorder ? visualOrderScratch[idx] : idx));
+  };
+
   // Fast path: no word on this line carries focus emphasis, so pass empty boundary/suffixX
   // vectors. TextBlock pays zero per-word RAM cost for these annotations when they are empty.
   bool lineHasFocusSplit = false;
@@ -1545,9 +1549,15 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   }
 
   if (!lineHasFocusSplit) {
+    std::vector<uint32_t> lineVisibleOffsets;
+    lineVisibleOffsets.reserve(lineWordCount);
+    for (size_t i = 0; i < lineWordCount; ++i) {
+      lineVisibleOffsets.push_back(visibleOffsetForLineWord(i));
+    }
+
     // TextBlock flattens the vectors into its arena; they stay owned here and die at return.
     auto block = std::make_shared<TextBlock>(lineWords, lineXPos, lineWordStyles, std::vector<uint8_t>{},
-                                             std::vector<uint16_t>{}, std::vector<uint32_t>(lineWordCount, 0),
+                                             std::vector<uint16_t>{}, lineVisibleOffsets,
                                              blockStyle, std::move(lineRubyTexts));
     if (!block->valid()) {
       LOG_ERR("PTX", "Dropping line: TextBlock arena allocation failed");
@@ -1570,8 +1580,14 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
         boundary == 0 ? 0 : measureFocusPrefixAdvance(renderer, fontId, lineWords[i], lineWordStyles[i], boundary));
   }
 
+  std::vector<uint32_t> lineVisibleOffsets;
+  lineVisibleOffsets.reserve(lineWordCount);
+  for (size_t i = 0; i < lineWordCount; ++i) {
+    lineVisibleOffsets.push_back(visibleOffsetForLineWord(i));
+  }
+
   auto block = std::make_shared<TextBlock>(lineWords, lineXPos, lineWordStyles, outBoundaries, outSuffixX,
-                                           std::vector<uint32_t>(lineWordCount, 0), blockStyle,
+                                           lineVisibleOffsets, blockStyle,
                                            std::move(lineRubyTexts));
   if (!block->valid()) {
     LOG_ERR("PTX", "Dropping line: TextBlock arena allocation failed");

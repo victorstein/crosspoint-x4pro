@@ -42,7 +42,10 @@ namespace {
 //      with no bottom inset refuse to draw.
 // v41: TextBlock's arena carries a per-word visible-codepoint offset array. The
 //      array is present but zero-valued at this version; v42 populates it.
-constexpr uint8_t SECTION_FILE_VERSION = 41;
+// v42: the per-word visible-offset array introduced in v41 is now populated.
+//      A v41 cache carries the array but all zeros, which would resolve every
+//      highlight to the chapter start.
+constexpr uint8_t SECTION_FILE_VERSION = 42;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects
