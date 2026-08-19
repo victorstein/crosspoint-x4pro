@@ -4,7 +4,7 @@
 
 **Goal:** Let the reader select a passage, highlight it, tag it, and browse this book's highlights by tag — rendering each highlight as an inverted block that survives re-pagination.
 
-**Architecture:** A pure geometry core decides *which rectangles* a highlight covers (host-tested); the reader applies them with `GfxRenderer::invertRect` in every render pass. Three new activities handle selection, tagging, and browsing, on the `ActivityManager` stack.
+**Architecture:** A pure geometry core turns word positions and offset ranges into rectangles (host-tested). The reader computes those rectangles **once per page** and replays them through `GfxRenderer::invertRect` in the B/W pass only. Three new activities handle selection, tagging, and browsing.
 
 **Tech Stack:** C++20, PlatformIO, host CMake + GoogleTest.
 
@@ -12,43 +12,42 @@
 
 **Delivery:** fork-only.
 
-> **This plan needs the device.** Every previous plan was verifiable from a build log. This one is not: ghosting, the grayscale interaction, and touch selection can only be judged by looking at a panel. Tasks 1–7 can be written and compiled without hardware; **Task 8 cannot be skipped**, and no task here should be called done on a green build alone.
+> **v2 — revised after adversarial review.** v1 deferred a question to hardware that the source answers definitively, and the answer was that its approach was wrong. It also contained a task that did nothing while eating 65% of the C3's free heap, a CMakeLists that would not link, a "reuse" that aborts under `-fno-exceptions`, long-press wiring that missed the only switch that fires on this device, and three defective tests including one that passes against an implementation returning nothing. All corrected below.
 
 ---
 
-## What already exists
+## The finding that reshaped this plan
 
-| Piece | Where |
-| --- | --- |
-| `GfxRenderer::invertRect` | `lib/GfxRenderer/GfxRenderer.cpp`, 9 host tests on the bit core |
-| Per-word offsets | `TextBlock::wordVisibleOffset(i)`, populated bidi-aware |
-| Range predicate | `lib/Epub/Epub/VisibleRange.h` — `contains`, `overlaps`, half-open |
-| Storage | `HighlightDoc` + `HighlightFile`, status-returning, atomic, `.tmp`-recovering |
-| Menu headroom | `MAX_MENU_ITEMS` raised 16 → 24, all loops clamped |
+v1 said applying `invertRect` inside `renderGrayscalePass` was safe and that whether it *looked* right was "unknown until hardware." Both halves were wrong.
 
-Nothing consumes any of it yet. This plan is where the dead surface comes alive.
+**The grayscale planes are not images.** Each is a sparse 1-bit *"drive this pixel with the gray waveform"* mask. Every pass starts from `renderer.clearScreen(0x00)` (`EpubReaderActivity.cpp:1441`), and bits are set only on anti-aliased glyph edges:
+
+```cpp
+// GfxRenderer.cpp:519-527
+} else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (bmpVal == 1 || bmpVal == 2)) {
+  // We have to flag pixels in reverse for the gray buffers, as 0 leave alone, 1 update
+  renderer.drawPixel(screenX, screenY, false);
+```
+
+XOR-ing a rectangle across that mask flips **every background pixel to "drive to gray"** and **clears every AA edge**. The result is a uniform gray slab with the glyphs punched out — not an inverted highlight. This is framebuffer-level and therefore identical on SSD1677, UC8179 and UC8279; the drivers differ only in whether they stream the planes verbatim or inverted.
+
+`invertRect` never consults `renderMode` (`GfxRenderer.cpp:1153-1186`) — and its own header comment already says so (`GfxRenderer.h:249`, *"It flips framebuffer bits regardless of renderMode"*). v1 documented the hazard and then designed into it.
+
+**Consequence:** the overlay runs in the **B/W pass only**, and `invertRect` gains a `renderMode` guard so the primitive is safe for every future caller.
+
+**Accepted limitation:** anti-aliased glyph edges inside a highlight keep their original gray, which on an inverted block will read as slight fringing. Swapping AA levels inside a highlight means rewriting both planes coherently — a different operation, deliberately out of scope. Task 8 judges whether the fringing is even noticeable at 219 PPI.
 
 ## Constraints that shape every task
 
-**Input.** The X4 Pro has **no physical Back, Confirm, Left or Right** — only Up/Down (GPIO0/GPIO7) and Power (`BoardConfig.h:1392-1398`). Back and Confirm come from the GT911 touchscreen and the capacitive Home key. **Selection is a touch flow.** Do not design a button-only path and assume it works.
+**Input.** The X4 Pro has **no physical Back, Confirm, Left or Right** — only Up/Down and Power (`BoardConfig.h:1392-1398`). Back and Confirm come from the touchscreen and the capacitive Home key. Selection is a touch flow, and long-press arrives through the **Home-key** switch, not the front-Confirm one.
 
-**The reader renders each page up to three times.** Text anti-aliasing is on by default (`CrossPointSettings.h:219`), and on a strip-grayscale panel `EpubReaderActivity.cpp:1387-1450` runs a B/W pass plus two more into the LSB/MSB planes, each in 80-row strips via a `renderGrayscalePass` lambda that calls `page->render(...)`. **A highlight applied only to the B/W framebuffer disappears under anti-aliasing.** The overlay must run wherever `page->render` runs.
+**Compute rects once.** `renderPlaneToBuffer` loops in 80-row strips per plane, so `renderGrayscalePass` runs ~12 times per page turn on a 480-row panel. Walking every word and allocating vectors inside it would reintroduce exactly the allocation churn the `TextBlock` arena exists to prevent (`TextBlock.h:14-17`: *"~250 throwing allocations per page load… the primary driver of heap fragmentation on the ESP32-C3"*).
 
-`invertRect` already honours strip mode — it writes through `getWriteTarget()` and clips to the active band — so it is safe inside the strip loop. Whether inverting a *grayscale plane* produces the right visual result is a genuine open question, answered only on hardware (Task 8).
+**Widths come from stored positions, not the renderer.** `TextBlock` already holds every word's x (`wordXpos(i)`), so word *i*'s right edge is `wordXpos(i+1)` for all but the last on a line. Measuring via `getTextAdvanceX` would require `ensureSdCardFontReady` to prewarm the advance table first (`DictionaryWordSelectActivity.cpp:105-108`) — without it, measurement falls into `onGlyphMiss()` and reads glyph metadata from SD per glyph, and the table caps at 768 entries per style so CJK misses by default.
 
-**Panel variants differ.** `supportsStripGrayscale()` is true for SSD1677 and UC8279 but **false for UC8179** (`Uc8179Driver.h:86`), and all three ship as X4 Pro panels (`BoardConfig.h:113-116`, auto-detected). Do not assume which one is in the device on your desk.
+**`std::get` aborts.** The build is `-fno-exceptions` (`platformio.ini:60`), so `std::get` on the wrong `ResultVariant` alternative calls `std::terminate`. Result routing must match exactly.
 
-**`ResultVariant` is a closed `std::variant`** (`ActivityResult.h:71-73`). Returning tag selections requires adding an alternative to that shared type — a small edit to a central file.
-
-**`SNAPSHOT_CAPACITY` is 4096 bytes** (`DictionaryWordSelectActivity.h:79`). One full-width 800px line at ~40px is ~4000 bytes, so two lines do not fit and `readFramebufferRegion` refuses (`GfxRenderer.cpp:1702-1704`), forcing a full two-pass page repaint per keypress.
-
-**Long-press is one exclusive slot.** `SETTINGS.longPressMenuFunction` switches over five mutually-exclusive values (`EpubReaderActivity.cpp:409-436`). A highlight option costs the user whichever action they use today.
-
-**Activity launch pattern**, from `EpubReaderActivity.cpp:286`:
-
-```cpp
-startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page), ...));
-```
+**C3 memory.** `platformio.ini:49` puts a reading session at *"~50KB free heap."* A resident 400-entry `HighlightDoc` is ~19 KB of vector storage plus per-label heap, and `HighlightFile::load` holds two `JsonDocument`s live at once. See Task 3 Step 4.
 
 ---
 
@@ -56,57 +55,54 @@ startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, 
 
 | File | Responsibility |
 | --- | --- |
-| `lib/Epub/Epub/HighlightGeometry.h` / `.cpp` (create) | Pure: word boxes + ranges → rectangles to invert |
-| `src/activities/reader/HighlightOverlay.h` / `.cpp` (create) | Walks a `Page`, calls the geometry core, issues `invertRect` |
-| `src/activities/reader/EpubReaderActivity.cpp` (modify) | Apply the overlay in every render pass; load/save highlights |
-| `src/activities/reader/PassageSelectActivity.{h,cpp}` (create) | Anchor-then-extend selection |
-| `src/activities/reader/TagPickerActivity.{h,cpp}` (create) | Pick from the palette, or type a new tag |
-| `src/activities/reader/HighlightsActivity.{h,cpp}` (create) | Browse and filter this book's highlights |
-| `src/activities/ActivityResult.h` (modify) | Add a tag-selection alternative |
-| `src/activities/reader/EpubReaderMenuActivity.{h,cpp}` (modify) | Two new menu entries |
-| `test/highlight_geometry/` (create) | Host tests for the geometry core |
+| `lib/GfxRenderer/GfxRenderer.cpp` (modify) | `invertRect` early-outs unless `renderMode == BW` |
+| `lib/Epub/Epub/HighlightGeometry.h` / `.cpp` (create) | Pure: word boxes + ranges → rectangles |
+| `src/activities/reader/HighlightOverlay.h` / `.cpp` (create) | Walks a `Page` once, produces rects |
+| `src/activities/reader/EpubReaderActivity.cpp` (modify) | Cache rects per page, replay in the B/W pass |
+| `src/activities/reader/PassageSelectActivity.{h,cpp}` (create) | Anchor-then-extend selection, own snapshot sizing |
+| `src/activities/reader/TagPickerActivity.{h,cpp}` (create) | Palette picker |
+| `src/activities/reader/HighlightsActivity.{h,cpp}` (create) | Browse and filter |
+| `src/activities/ActivityResult.h` (modify) | Tag-selection alternative |
+| `src/CrossPointSettings.h`, `src/SettingsList.h`, `EpubReaderActivity.cpp`, `EpubReaderMenuActivity.{h,cpp}` (modify) | Menu and long-press wiring — **four** sites |
+| `test/highlight_geometry/` (create) | Host tests |
 
 ---
 
-### Task 1: Enlarge the selection snapshot buffer
+### Task 1: Make `invertRect` safe outside the B/W pass
 
-Multi-line selection is unusable at 4096 bytes — every extension triggers a full page repaint with a glyph reload. With 8MB of PSRAM this is cheap.
+**Files:** `lib/GfxRenderer/GfxRenderer.cpp`, `lib/GfxRenderer/GfxRenderer.h`
 
-**Files:** `src/activities/reader/DictionaryWordSelectActivity.h`
+- [ ] **Step 1: Add the guard**
 
-- [ ] **Step 1: Size it for a realistic selection**
-
-`SNAPSHOT_CAPACITY` must hold the framebuffer region under a multi-line selection: `widthBytes × lineHeight × lines`. At 100 bytes/row and ~40px lines, six lines is ~24,000 bytes. Raise it to **32768** and note why:
+In `GfxRenderer::invertRect`, beside the existing early-outs:
 
 ```cpp
-  // Framebuffer bytes saved under the selection highlight so a cursor move can
-  // restore them instead of re-rendering the page. 4096 held barely one
-  // full-width line, so any multi-line selection fell back to a full two-pass
-  // repaint per keypress. Sized for ~6 lines at 800px; the X4 Pro has 8MB PSRAM
-  // and allocation failure already degrades gracefully to the full-repaint path.
-  static constexpr size_t SNAPSHOT_CAPACITY = 32768;
+  // The grayscale planes are sparse "drive this pixel with the gray waveform"
+  // masks cleared to 0x00 each pass, not images. XOR-ing a rect across one sets
+  // every background pixel to "drive to gray" and clears the anti-aliased glyph
+  // edges — a solid slab with the glyphs punched out, on every panel. Inverting
+  // is only meaningful on the B/W framebuffer.
+  if (renderMode != BW) return;
 ```
 
-- [ ] **Step 2: Confirm the allocation still degrades gracefully**
+- [ ] **Step 2: Correct the header comment**
 
-Read the allocation site. If it cannot allocate, `snapshot` is null and `drawHighlightWithSnapshot` already falls back. Verify that path is intact — on the **C3** this allocation is far more likely to fail, and `default` is still a C3 build.
+`GfxRenderer.h:249` currently warns that the method flips bits regardless of `renderMode`. Replace that with the guarantee it now provides: the call is a no-op outside `BW`, so a caller inside a grayscale pass is safe rather than silently wrong.
 
 - [ ] **Step 3: Build both boards and commit**
 
 ```bash
 pio run -e x4pro && pio run -e default
-git add src/activities/reader/DictionaryWordSelectActivity.h
-git commit -m "perf(reader): size the selection snapshot for multi-line ranges"
+git add lib/GfxRenderer/GfxRenderer.h lib/GfxRenderer/GfxRenderer.cpp
+git commit -m "fix(gfx): make invertRect a no-op outside the B/W render mode"
 ```
 
 ---
 
 ### Task 2: Pure highlight geometry
 
-Which rectangles a highlight covers is arithmetic, and arithmetic is testable without a panel.
-
 **Files:**
-- Create: `lib/Epub/Epub/HighlightGeometry.h`, `lib/Epub/Epub/HighlightGeometry.cpp`
+- Create: `lib/Epub/Epub/HighlightGeometry.h`, `.cpp`
 - Create: `test/highlight_geometry/HighlightGeometryTest.cpp`, `test/highlight_geometry/CMakeLists.txt`
 - Modify: `test/CMakeLists.txt`
 
@@ -116,31 +112,35 @@ Which rectangles a highlight covers is arithmetic, and arithmetic is testable wi
 // test/highlight_geometry/HighlightGeometryTest.cpp
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "Epub/HighlightGeometry.h"
 
 namespace {
 
-// Three words on one row, then two on the next.
+// Three words on one row, then two on the next. Widths derived from the next
+// word's x, as the real walk does.
 std::vector<HighlightWord> sampleWords() {
   return {
-      {100, 0, 0, 50, 40},   // offset 100, x 0,   y 0,  w 50
-      {110, 60, 0, 40, 40},  // offset 110, x 60,  y 0,  w 40
-      {120, 110, 0, 30, 40}, // offset 120, x 110, y 0,  w 30
-      {130, 0, 40, 45, 40},  // offset 130, x 0,   y 40, w 45
-      {140, 55, 40, 35, 40}, // offset 140, x 55,  y 40, w 35
+      {100, 0, 0, 50, 40},    // offset 100, x 0,   w 50 -> right edge 50
+      {110, 60, 0, 40, 40},   // offset 110, x 60,  w 40 -> right edge 100
+      {120, 110, 0, 30, 40},  // offset 120, x 110, w 30
+      {130, 0, 40, 45, 40},   // next row
+      {140, 55, 40, 35, 40},
   };
 }
+
+constexpr int16_t kGap = 12;  // merge tolerance wider than the 10px inter-word gap
 
 }  // namespace
 
 TEST(HighlightGeometry, EmptyRangeCoversNothing) {
-  EXPECT_TRUE(highlightRects(sampleWords(), {VisibleRange{120, 120}}).empty());
+  EXPECT_TRUE(highlightRects(sampleWords(), {VisibleRange{120, 120}}, kGap).empty());
 }
 
 TEST(HighlightGeometry, ASingleWordYieldsOneRect) {
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{110, 111}});
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{110, 111}}, kGap);
   ASSERT_EQ(rects.size(), 1u);
   EXPECT_EQ(rects[0].x, 60);
   EXPECT_EQ(rects[0].y, 0);
@@ -149,61 +149,92 @@ TEST(HighlightGeometry, ASingleWordYieldsOneRect) {
 }
 
 TEST(HighlightGeometry, AdjacentWordsOnOneRowMergeIntoOneRect) {
-  // Words at offsets 100 and 110 sit at x=0..50 and x=60..100 on the same row.
-  // Merging avoids a seam of un-inverted background between them.
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}});
+  // Words at 100 and 110 occupy x 0..50 and 60..100 — a 10px gap. Merging makes
+  // the gap invert too, so the highlight reads as one block, not striped text.
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}}, kGap);
   ASSERT_EQ(rects.size(), 1u);
   EXPECT_EQ(rects[0].x, 0);
-  EXPECT_EQ(rects[0].w, 100) << "spans from the first word's left to the second word's right";
+  EXPECT_EQ(rects[0].w, 100);
+}
+
+TEST(HighlightGeometry, AGapWiderThanTheToleranceDoesNotMerge) {
+  // The same two words with a tolerance below the 10px gap must stay separate.
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}}, 4);
+  ASSERT_EQ(rects.size(), 2u);
+  EXPECT_EQ(rects[0].w, 50);
+  EXPECT_EQ(rects[1].x, 60);
 }
 
 TEST(HighlightGeometry, ARangeSpanningTwoRowsYieldsARectPerRow) {
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{110, 140}});
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{110, 140}}, kGap);
   ASSERT_EQ(rects.size(), 2u);
   EXPECT_EQ(rects[0].y, 0);
   EXPECT_EQ(rects[1].y, 40) << "rows never merge — they are not contiguous in y";
 }
 
-TEST(HighlightGeometry, HalfOpenAtBothEnds) {
-  // start is inclusive, end exclusive: 100..120 takes offsets 100 and 110, not 120.
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}});
+TEST(HighlightGeometry, EndIsExclusive) {
+  // 100..120 takes the words at 100 and 110; the word at exactly 120 is excluded,
+  // so the rect stops at x=100 rather than extending to 140.
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}}, kGap);
   ASSERT_EQ(rects.size(), 1u);
-  EXPECT_EQ(rects[0].w, 100) << "word at offset 120 must be excluded";
+  EXPECT_EQ(rects[0].x + rects[0].w, 100) << "the word at offset 120 must not be covered";
 }
 
 TEST(HighlightGeometry, WordsOutsideEveryRangeAreIgnored) {
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{500, 600}});
-  EXPECT_TRUE(rects.empty());
+  EXPECT_TRUE(highlightRects(sampleWords(), {VisibleRange{500, 600}}, kGap).empty());
 }
 
 TEST(HighlightGeometry, MultipleRangesEachContribute) {
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 105}, VisibleRange{140, 145}});
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 105}, VisibleRange{140, 145}}, kGap);
   ASSERT_EQ(rects.size(), 2u);
   EXPECT_EQ(rects[0].y, 0);
   EXPECT_EQ(rects[1].y, 40);
 }
 
-TEST(HighlightGeometry, AWordIsNotDuplicatedByOverlappingRanges) {
-  // Two ranges both covering offset 110 must not invert it twice — a double
-  // invert is a no-op and would leave the word looking un-highlighted.
-  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}, VisibleRange{105, 125}});
-  for (size_t i = 1; i < rects.size(); ++i) {
-    EXPECT_NE(rects[i].x, rects[i - 1].x) << "overlapping ranges produced duplicate rects";
-  }
+TEST(HighlightGeometry, OverlappingRangesDoNotDoubleCoverAWord) {
+  // Inverting the same pixels twice restores them, so a word covered by two
+  // ranges would render UN-highlighted. Both ranges cover offsets 100 and 110,
+  // which merge to exactly one rect.
+  const auto rects = highlightRects(sampleWords(), {VisibleRange{100, 120}, VisibleRange{105, 125}}, kGap);
+  ASSERT_EQ(rects.size(), 1u) << "the two ranges together cover 100,110,120 on one row";
+  EXPECT_EQ(rects[0].x, 0);
+  EXPECT_EQ(rects[0].x + rects[0].w, 140) << "including the word at 120, which the second range reaches";
 }
 
-TEST(HighlightGeometry, UnsortedWordsStillProduceCorrectRects) {
-  // TextBlock word order is VISUAL, not logical — on an RTL line the offsets
-  // run backwards. The geometry must not assume ascending offsets.
+TEST(HighlightGeometry, VisualOrderInputStillProducesCorrectRects) {
+  // TextBlock word order is VISUAL, not logical — on an RTL line the offsets run
+  // backwards. The geometry must not assume ascending offsets.
   auto words = sampleWords();
   std::reverse(words.begin(), words.end());
-  const auto rects = highlightRects(words, {VisibleRange{110, 111}});
+  const auto rects = highlightRects(words, {VisibleRange{110, 111}}, kGap);
   ASSERT_EQ(rects.size(), 1u);
   EXPECT_EQ(rects[0].x, 60);
 }
 ```
 
-- [ ] **Step 2: Register the suite** (model on `test/visible_range/CMakeLists.txt`, include `${REPO_ROOT}/lib/Epub`; **no `${REPO_ROOT}/src`**)
+- [ ] **Step 2: Register the suite**
+
+Model on **`test/highlight_doc/CMakeLists.txt`**, not `visible_range` — `VisibleRange` is header-only, but `HighlightGeometry` has a `.cpp` that must be listed or the link fails:
+
+```cmake
+add_executable(HighlightGeometryTest
+  HighlightGeometryTest.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/HighlightGeometry.cpp
+)
+
+target_include_directories(HighlightGeometryTest PRIVATE
+  ${REPO_ROOT}/lib/Epub
+)
+
+target_link_libraries(HighlightGeometryTest PRIVATE
+  crosspoint_test_common
+  GTest::gtest_main
+)
+
+gtest_discover_tests(HighlightGeometryTest)
+```
+
+Add `add_subdirectory(highlight_geometry)` to `test/CMakeLists.txt`. **No `${REPO_ROOT}/src`.**
 
 - [ ] **Step 3: Run and confirm failure**
 
@@ -218,8 +249,9 @@ TEST(HighlightGeometry, UnsortedWordsStillProduceCorrectRects) {
 
 #include "VisibleRange.h"
 
-// A rendered word reduced to what highlighting needs: its anchor offset and its
-// box. Screen coordinates, already including margins and ruby shift.
+// A rendered word reduced to what highlighting needs. Screen coordinates,
+// already including margins and ruby shift. Width is derived from the next
+// word's x position, never measured through the renderer.
 struct HighlightWord {
   uint32_t offset;
   int16_t x;
@@ -237,114 +269,123 @@ struct HighlightRect {
 
 // Rectangles to invert so every word inside any range is covered.
 //
-// Words on the same row whose boxes are contiguous are merged, so the inter-word
-// gap inverts too and a multi-word highlight reads as one block rather than
-// striped text. Rows never merge. A word covered by several ranges yields one
-// rect, not several — inverting twice restores the original pixels.
+// Words on the same row are merged when the next box starts within `gapTolerance`
+// of the previous box's right edge, so inter-word gaps invert too and a
+// multi-word highlight reads as one block rather than striped text. The
+// tolerance is a parameter because inter-word gaps scale with font size: a fixed
+// value under-merges at large sizes and can merge across a paragraph indent at
+// small ones. Rows never merge.
 //
-// Word order is NOT assumed to be ascending by offset: TextBlock stores words in
+// A word covered by several ranges yields ONE rect. Inverting the same pixels
+// twice restores them, so a double-covered word would render un-highlighted.
+//
+// Word order is NOT assumed ascending by offset: TextBlock stores words in
 // visual order, which runs backwards on an RTL line.
 std::vector<HighlightRect> highlightRects(const std::vector<HighlightWord>& words,
-                                          const std::vector<VisibleRange>& ranges);
+                                          const std::vector<VisibleRange>& ranges, int16_t gapTolerance);
 ```
 
 - [ ] **Step 5: Implement, run passing, commit**
 
-Sort candidate words by `(y, x)` before merging — the input may be in visual order. Merge on the same `y` when the next box starts at or before the previous box's right edge plus the inter-word gap.
-
-```bash
-git commit -m "feat(epub): add host-tested highlight rectangle geometry"
-```
+Collect covered words (a word is covered if **any** range contains it — test membership once per word, which is what prevents duplicates), sort by `(y, x)`, then merge along each row.
 
 ---
 
-### Task 3: Apply the overlay in every render pass
+### Task 3: Compute the overlay once and replay it
 
 **Files:**
-- Create: `src/activities/reader/HighlightOverlay.h`, `.cpp`
-- Modify: `src/activities/reader/EpubReaderActivity.cpp`
+- Create: `src/activities/reader/HighlightOverlay.{h,cpp}`
+- Modify: `src/activities/reader/EpubReaderActivity.{h,cpp}`
 
-- [ ] **Step 1: Write the page walker**
+- [ ] **Step 1: The page walk**
 
-`HighlightOverlay::apply(renderer, page, ranges, fontId, marginLeft, marginTop)` builds `HighlightWord`s and issues `renderer.invertRect` for each returned rect.
+`HighlightOverlay::buildRects(page, ranges, marginLeft, marginTop, lineHeight, gapTolerance) -> std::vector<HighlightRect>`.
 
-The walk mirrors `DictionaryWordSelectActivity.cpp:74-95` exactly — that code is the working reference:
+Mirrors the collection loop at `DictionaryWordSelectActivity.cpp:74-95` — iterate `page->elements`, skip non-`TAG_PageLine`, take `line->getBlock()`, then per word:
+
+- `x = line->xPos + block->wordXpos(i) + marginLeft`
+- `y = line->yPos + marginTop + block->getRubyShift(ascender)`
+- `offset = block->wordVisibleOffset(i)`
+- `w = block->wordXpos(i + 1) - block->wordXpos(i)` for all but the last word on the line; the last word's right edge comes from the line's own extent
+
+**Do not filter by `isSelectableToken`** — word-select skips punctuation because it cannot be looked up in a dictionary, but a highlight must cover it or the block will have holes. `ParsedText::pushToken` populates `wordXpos` and `wordVisibleOffset` for every token uniformly (`ParsedText.cpp:408-419`), so the positions exist.
+
+**Do not measure through the renderer.** No `getTextAdvanceX`, no `ensureSdCardFontReady` — see Constraints.
+
+- [ ] **Step 2: Cache per page, replay per pass**
+
+In `renderContents`, **before** the B/W `page->render` at `:1411`, compute the rects once into a local `std::vector<HighlightRect>`. Then apply them after the B/W render only.
+
+Do **not** apply inside `renderGrayscalePass` — Task 1's guard makes that a no-op anyway, but calling it there would still burn a walk per strip per plane.
+
+Two call sites the overlay must **not** touch:
+- `:1374` — inside the `PrewarmScope` scan; `invertRect` early-outs on `isScanning()`.
+- `:313` — the idle prewarm of the **next** page, rendered at margins `0,0`. Applying this page's rects there would be actively wrong.
+
+Also note `:1405-1407`: on pages with images, `renderWithImagePlaceholders` displays a frame before the real render, so a highlight appears one frame late there. Acceptable; record it.
+
+- [ ] **Step 3: A temporary highlight, so this task is verifiable when it lands**
+
+Nothing creates highlights until Task 4, and this is the riskiest task in the plan. Add a **temporary** hardcoded `VisibleRange` covering a few words on the current spine, verify it on device (Task 8 Steps 2–4 can run early against it), and delete it in Task 4. Mark it clearly:
 
 ```cpp
-  for (const auto& element : page->elements) {
-    if (element->getTag() != TAG_PageLine) continue;
-    const auto* line = static_cast<const PageLine*>(element.get());
-    const auto& block = line->getBlock();
-    if (!block || !block->valid()) continue;
-    const int ascender = renderer.getFontAscenderSize(fontId);
-    const int rubyShift = block->getRubyShift(ascender);
-    for (uint16_t i = 0; i < block->wordCount(); i++) {
-      // x = line->xPos + block->wordXpos(i) + marginLeft
-      // y = line->yPos + marginTop + rubyShift
-      // offset = block->wordVisibleOffset(i)
-    }
-  }
+  // TEMPORARY (removed in Task 4): a fixed range so the overlay can be seen on
+  // hardware before PassageSelectActivity exists.
 ```
 
-Width comes from the renderer's advance for the word text and style, the same measurement word-select performs. Height is the line height.
+- [ ] **Step 4: Decide the C3 memory question before loading a document**
 
-**Do not filter by `isSelectableToken`.** Word-select skips punctuation because you cannot look it up in a dictionary; a highlight must cover it or the block will have holes.
+`HighlightFile::load` holds two `JsonDocument`s live at once against a 45,000-byte budget, and a resident 400-entry doc is ~19 KB of vector storage — on a chip the repo puts at ~50 KB free during reading.
 
-- [ ] **Step 2: Apply it in all three passes**
+Choose and record one:
+- **(a)** Gate highlights on PSRAM: no load, no menu entries, on non-PSRAM boards.
+- **(b)** State a C3 budget and design to it — load only the current spine's entries rather than the whole document.
 
-In `EpubReaderActivity.cpp`, after the B/W `page->render(...)`, and **inside the `renderGrayscalePass` lambda** (`:1396-1400`) after its `page->render(...)`. The lambda runs per 80-row strip for both planes; `invertRect` clips to the active strip, so the same call is correct in all three places.
+**(a) is recommended**: the X4 Pro is the target, and (b) needs a per-spine file format this plan does not have.
 
-```cpp
-  // Applied after every page->render, in the B/W pass and inside
-  // renderGrayscalePass, because anti-aliasing re-renders the page into the
-  // LSB/MSB planes. An overlay only on the B/W framebuffer vanishes under AA.
-```
+- [ ] **Step 5: Handle a failed load honestly**
 
-- [ ] **Step 3: Load the book's highlights on entry**
+On `LoadResult::Failed`, do **not** save for the rest of the session and tell the user — the file may still hold their data. There is no shared toast in this codebase: `GUI.drawPopup(renderer, text)` exists (used as `showBuildPopup`) and is fire-and-forget into the framebuffer. Add a small `showMessage` helper here that Tasks 4 and 5 reuse, rather than three activities each rolling their own like `DictionaryWordSelectActivity` does.
 
-`HighlightFile::load` on book open; keep the `HighlightDoc` on the activity. On `LoadResult::Failed`, **do not save** for the rest of the session and surface a message — the file may still hold the user's data.
-
-Only ranges for the current spine index matter: use `HighlightDoc::findBySpine`.
-
-- [ ] **Step 4: Build both boards and commit**
-
-There is no host test for this task — it is renderer and activity code. The geometry beneath it is covered by Task 2; correctness of the *visual* result is Task 8.
+- [ ] **Step 6: Build both boards and commit**
 
 ---
 
 ### Task 4: `PassageSelectActivity`
 
-**Files:** create `src/activities/reader/PassageSelectActivity.{h,cpp}`
+**Files:** create `src/activities/reader/PassageSelectActivity.{h,cpp}`; modify `EpubReaderActivity.cpp` to remove Task 3's temporary range
 
-Derive from the structure of `DictionaryWordSelectActivity` — word-box extraction, hit-testing, differential repaint — and add a second anchor.
+- [ ] **Step 1: Size its own snapshot buffer**
 
-- [ ] **Step 1: Two-anchor selection**
+This is where multi-line selection actually lives. `DictionaryWordSelectActivity`'s `SNAPSHOT_CAPACITY` is 4096 and sized for a **single word** (`selected` is one `int`, snapshotting ~1.7 KB) — it is not inherited and must not be raised there.
 
-Tap or arrow to the first word and confirm; tap or arrow to the last and confirm. Selection-in-progress renders as an **outlined box**, deliberately distinct from a committed highlight's inverted block, or the user cannot tell what is already saved.
+Size this class's buffer from its own worst case: `widthBytes × lineHeight × maxSelectedLines`. On the C3 a large allocation is a real risk against ~50 KB free heap, so allocate with `makeUniqueNoThrow` and keep the full-repaint fallback intact when it returns null.
 
-Remember there is no physical Confirm on this device — confirm is a tap or the capacitive Home key.
+- [ ] **Step 2: Two-anchor selection**
 
-- [ ] **Step 2: Action bar and result**
+Tap or arrow to the first word and confirm; tap or arrow to the last and confirm. Selection-in-progress renders as an **outlined box**, distinct from a committed highlight's inverted block — otherwise the user cannot tell what is already saved. Confirm is a tap or the Home key; there is no physical Confirm.
 
-Highlight / Tag / Cancel. On confirm, build a `HighlightEntry` with `spineIndex`, the `VisibleRange` from the two anchors' offsets (half-open: `end` is the last word's offset + 1), and the label from the selected text.
+- [ ] **Step 3: Build the entry**
 
-**Take offsets from `wordVisibleOffset`, never recompute them from the text.** Offsets are counted on the raw parse stream and include collapsed whitespace and skipped content; any independent recount diverges, and NFC composition shifts intra-word offsets for NFD source text.
+`end` = last word's offset **+ 1**. Verified correct: `contains` tests a word's start offset, offsets are strictly increasing across tokens, and no path emits two words at the same offset.
 
-- [ ] **Step 3: Save through `HighlightFile`**
+Take offsets from `wordVisibleOffset` — never recompute them from text.
 
-Honour `SaveResult`: on `TooLarge`, tell the user the book has too many highlights rather than failing silently.
+> Note for whoever closes the overlap question: because `end` is word-granular, `VisibleRange::overlaps` between two stored highlights is not meaningful. It is correct for `contains`, which is all the render path needs.
 
-- [ ] **Step 4: Build both boards and commit**
+- [ ] **Step 4: Save, honouring `SaveResult`**
+
+On `TooLarge`, tell the user via Task 3's helper rather than failing silently.
+
+- [ ] **Step 5: Remove the temporary range from Task 3, build both boards, commit**
 
 ---
 
 ### Task 5: `TagPickerActivity` and the result type
 
-**Files:** create `src/activities/reader/TagPickerActivity.{h,cpp}`; modify `src/activities/ActivityResult.h`
+**Files:** create `TagPickerActivity.{h,cpp}`; modify `src/activities/ActivityResult.h`
 
 - [ ] **Step 1: Extend `ResultVariant`**
-
-It is a closed variant (`ActivityResult.h:71-73`), so add an alternative:
 
 ```cpp
 struct TagSelectionResult {
@@ -352,49 +393,63 @@ struct TagSelectionResult {
 };
 ```
 
-and include it in the `using ResultVariant = std::variant<...>` list. Adding to a shared central type is unavoidable here — note it in the commit message.
+Verified safe: no exhaustive `std::visit` exists over `ResultVariant` (every consumer uses `std::get<T>`), and `ProgressChangeResult` is already larger, so the variant does not grow. Note in the commit that `ActivityResult`'s converting constructor is `requires std::is_constructible_v<...>`, so a new alternative can change how a previously-ambiguous conversion resolves.
 
 - [ ] **Step 2: The picker**
 
-List the book's palette with a check state per tag; a "New tag…" row pushes the existing `KeyboardEntryActivity` and calls `HighlightDoc::addTag`. Handle `addTag` returning `nullopt` — the palette is full, or the name is empty or too long — with a visible message rather than a silent no-op.
+Palette list with a check state per tag; a "New tag…" row pushes `KeyboardEntryActivity` and calls `HighlightDoc::addTag`. Handle `nullopt` — palette full, or the name empty or too long — with a visible message.
 
-- [ ] **Step 3: Return the selection**, build both boards, commit
+- [ ] **Step 3: Build both boards and commit**
 
 ---
 
 ### Task 6: `HighlightsActivity`
 
-**Files:** create `src/activities/reader/HighlightsActivity.{h,cpp}`
+**Files:** create `HighlightsActivity.{h,cpp}`
 
-- [ ] **Step 1: Browse**
+- [ ] **Step 1: Browse and filter**
 
-List this book's highlights by label, most recent first. Selecting one jumps to it via the existing offset-jump path (`Section::getPageForVisibleTextOffset`, as `EpubReaderActivity.cpp:626-634` already does for KOReader sync).
+List this book's highlights by label; a tag filter narrows them. Tags are per-book by design — this screen must not imply a cross-book view.
 
-- [ ] **Step 2: Filter by tag**
+- [ ] **Step 2: Jump by returning a `ProgressChangeResult`**
 
-A tag filter row narrows the list. Tags are per-book by design — there is no cross-book view and this screen must not imply one.
+**Do not route through `progressChangeResultHandler`.** That block (`EpubReaderActivity.cpp:623-640`) is a lambda local to `onReaderMenuConfirm` that opens with `std::get<ProgressChangeResult>(result.data)`; under `-fno-exceptions` a mismatched alternative calls `std::terminate`. It also calls `loadCachedBookmarks()` and re-opens the reader menu on cancel — both wrong here.
+
+Return a `ProgressChangeResult` with `hasVisibleTextOffset = true` and the highlight's `start`, so the existing jump path applies unchanged. Alternatively extract `:626-640` into a named member both handlers call; returning the existing type is cheaper.
 
 - [ ] **Step 3: Delete**
 
-`HighlightDoc::removeHighlight` then save. This is the only destructive action in the feature; confirm before deleting.
+`HighlightDoc::removeHighlight` then save. The only destructive action in the feature — confirm first. Any cached rects must be invalidated after a mutation.
+
+> **Lifetime:** cache derived `HighlightRect` values, never the `const HighlightEntry*` that `findBySpine` returns. `addHighlight` is a `push_back`, so reallocation invalidates every outstanding pointer.
 
 - [ ] **Step 4: Build both boards and commit**
 
 ---
 
-### Task 7: Menu and long-press wiring
-
-**Files:** modify `EpubReaderMenuActivity.{h,cpp}`, `EpubReaderActivity.cpp`
+### Task 7: Menu and long-press wiring — four sites
 
 - [ ] **Step 1: Two menu entries**
 
-`HIGHLIGHT_PASSAGE` and `HIGHLIGHTS`. The cap is 24 with every loop clamped, so there is headroom — but re-check the count: 13 unconditional + footnotes + bookmarks + frontlight + these two is 18.
+`HIGHLIGHT_PASSAGE` and `HIGHLIGHTS` in `EpubReaderMenuActivity`. Count verified: 13 unconditional + footnotes + bookmarks + frontlight + 2 = **18**, against `MAX_MENU_ITEMS = 24`. `HighlightsActivity` sits **beside** bookmarks, not replacing it.
 
-**`HighlightsActivity` sits beside the bookmarks entry, not replacing it.** Bookmarks and highlights are different things.
+> `listCount()` (`EpubReaderMenuActivity.h:59`) still returns the unclamped `menuItems.size()`, but at 18 < 24 it is unreachable. Noted so it is not re-raised; no action.
 
-- [ ] **Step 2: Long-press option**
+- [ ] **Step 2: The long-press option — all four edit sites**
 
-Add `LP_MENU_HIGHLIGHT` to `SETTINGS.longPressMenuFunction`. Say plainly in the setting's description that choosing it replaces the current long-press action — the slot is exclusive.
+1. `src/CrossPointSettings.h:148-152` — add `LP_MENU_HIGHLIGHT` to the enum.
+2. `src/SettingsList.h:181-186` — add the picker value. **Fix the positional trap first:**
+
+```cpp
+  const size_t count = BoardConfig::hasHomeKey() ? std::size(VALUES) : std::size(VALUES) - 1;
+```
+
+The index is the enum value and the non-Home-key case hides the **last** entry positionally. Appending would hide *highlight* and newly **expose** `READER_MENU` on boards deliberately denied it. Replace `- 1` with an explicit per-board filter before appending.
+
+3. `EpubReaderActivity.cpp:409-436` — the front-Confirm switch.
+4. `EpubReaderActivity.cpp:442-465` — **the Home-key switch.** The X4 Pro is a Home-key board (`BoardConfig.h:1396`: back and confirm are `PIN_UNASSIGNED`), so this is the only one that fires on the target device. Missing it means the option silently does nothing, via `default: break;` at `:462-464`.
+
+Say plainly in the setting's description that choosing it replaces the current long-press action.
 
 - [ ] **Step 3: Build both boards, full host suite, commit**
 
@@ -402,35 +457,35 @@ Add `LP_MENU_HIGHLIGHT` to `SETTINGS.longPressMenuFunction`. Say plainly in the 
 
 ### Task 8: On-device verification — mandatory
 
-Nothing above is confirmed until this passes. Record results in `docs/superpowers/notes/`.
+Record results in `docs/superpowers/notes/`.
 
 - [ ] **Step 1: Anchoring survives re-pagination**
 
-Highlight a passage. Change the font size **two steps** in each direction, change margins, rotate the screen. The highlight must cover **the same words** every time. This is the property the whole feature rests on and the one the host suite can only approximate.
+Highlight a passage; change font size two steps each way, change margins, rotate. It must cover **the same words** every time.
 
-- [ ] **Step 2: Anti-aliasing**
+- [ ] **Step 2: Anti-aliasing fringing**
 
-With text AA **on** (the default), confirm the highlight renders correctly and does not vanish or flicker between passes. Then turn AA **off** and confirm it still renders. If it appears only with AA off, the overlay is missing from the grayscale planes.
+With AA **on** (default), check the anti-aliased glyph edges inside a highlight. Task 1 leaves them at their original gray, so slight fringing is expected — judge whether it is noticeable at 219 PPI. Then confirm the highlight renders identically with AA **off**.
 
 - [ ] **Step 3: Ghosting**
 
-Turn several pages with a highlight on screen, then to a page without one. Look for residual shadow where the inverted block was. If it ghosts badly, a full refresh on highlight change is the fallback.
+Turn several pages with a highlight on screen, then to one without. Look for residual shadow. Fallback is a full refresh on highlight change.
 
 - [ ] **Step 4: Panel variant**
 
-Note which controller the unit reports (SSD1677 / UC8179 / UC8279). UC8179 has no strip grayscale, so its render path differs — record which one was tested, because the other two are then unverified.
+Record which controller the unit reports (SSD1677 / UC8179 / UC8279). The other two remain unverified.
 
 - [ ] **Step 5: RTL**
 
-With an RTL EPUB, highlight a passage and confirm it covers the intended words rather than mirrored ones. The host suite covers the anchor permutation; this covers the geometry.
+With an RTL EPUB, confirm the highlight covers the intended words, not mirrored ones.
 
 - [ ] **Step 6: Selection feel**
 
-Multi-line selection after Task 1's buffer change: does extending across lines repaint smoothly, or still stutter? Record the subjective result — this is the one thing no test can express.
+Multi-line selection with Task 4's snapshot sizing: smooth, or still stuttering? Subjective and worth recording.
 
 - [ ] **Step 7: Durability**
 
-Create highlights, power off uncleanly mid-save if you can, and confirm nothing is lost. Check `/.crosspoint/highlights/` for orphaned `.tmp` files.
+Create highlights, interrupt a save if you can, confirm nothing is lost. Check `/.crosspoint/highlights/` for orphaned `.tmp` files.
 
 - [ ] **Step 8: Record and commit**
 
@@ -440,16 +495,15 @@ Create highlights, power off uncleanly mid-save if you can, and confirm nothing 
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Highlight missing from the grayscale planes | High | Applied inside `renderGrayscalePass`; Task 8 Step 2 tests AA on *and* off |
-| Inverting a grayscale plane looks wrong | High | Genuinely unknown until Task 8; fallback is to force B/W refresh while a highlight is on screen |
-| Ghosting from inverted blocks | Medium | Task 8 Step 3; fallback is a full refresh on change |
-| Only one panel variant gets tested | Medium | Record which; treat the others as unverified |
-| Multi-line selection still stutters | Medium | Task 1 raises the buffer; Task 8 Step 6 judges it |
-| Long-press change annoys the user | Low | Opt-in setting, described honestly |
+| AA fringing inside a highlight is ugly | Medium | Task 8 Step 2; fallback is forcing a B/W-only refresh while a highlight is on screen |
+| Ghosting from inverted blocks | Medium | Task 8 Step 3 |
+| C3 heap exhaustion | Medium | Task 3 Step 4 gates on PSRAM |
+| Only one panel variant tested | Medium | Recorded, not claimed as general |
+| Long-press option silently dead on this device | Low | Task 7 Step 2 names the Home-key switch explicitly |
+| Cached rects outlive a mutation | Low | Cache values, not pointers; invalidate on change |
 
 ## Deliberately out of scope
 
-- **Cross-book tags.** Per-book by design.
-- **Notes.** Tags only.
-- **On-page tag markers.** Decided against: a marker inside an inverted block clutters the page for a question rarely asked mid-read, and it stays purely additive to add later.
-- **Overlap policy.** `addHighlight` neither merges nor rejects overlapping ranges. The geometry de-duplicates rects so overlaps render correctly; whether the *data model* should permit them is a product decision this plan leaves open.
+- **Cross-book tags**, **notes**, and **on-page tag markers** — all decided against earlier.
+- **Coherent AA inside highlights.** Would require rewriting both grayscale planes; a different operation.
+- **Overlap policy.** The geometry de-duplicates rects so overlaps render correctly. Whether the data model should permit them is a product decision — and note that `VisibleRange::overlaps` cannot answer it for word-granular stored ranges.
