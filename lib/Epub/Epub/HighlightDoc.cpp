@@ -2,6 +2,7 @@
 
 #include <Utf8.h>
 
+#include <algorithm>
 #include <utility>
 
 std::optional<uint16_t> HighlightDoc::addTag(const std::string& name) {
@@ -19,10 +20,17 @@ std::optional<uint16_t> HighlightDoc::addTag(const std::string& name) {
 
 void HighlightDoc::removeTag(uint16_t index) {
   if (static_cast<size_t>(index) >= tags_.size()) return;
-  // Stub: erases the tag but does not renumber tagIndices in highlights_, so
-  // any reference past `index` now points at the wrong palette entry. Full
-  // renumbering is Task 5.
   tags_.erase(tags_.begin() + index);
+
+  for (auto& highlight : highlights_) {
+    auto& indices = highlight.tagIndices;
+    indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                  [index](const uint16_t ref) { return ref == index; }),
+                  indices.end());
+    for (uint16_t& ref : indices) {
+      if (ref > index) ref = static_cast<uint16_t>(ref - 1);
+    }
+  }
 }
 
 bool HighlightDoc::addHighlight(HighlightEntry entry) {

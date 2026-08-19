@@ -194,3 +194,78 @@ TEST(HighlightDoc, WorstCaseDocumentStaysUnderTheSaveBudget) {
   // safety mechanism and MAX_HIGHLIGHTS as a growth limit only.
   EXPECT_GT(bytes, 50000u) << "if this ever fits, the caps changed — revisit the guard's necessity";
 }
+
+TEST(HighlightDocTags, DeletingAMiddleTagKeepsEveryReferenceOnItsName) {
+  HighlightDoc doc;
+  doc.addTag("alpha");
+  doc.addTag("beta");
+  doc.addTag("gamma");
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  doc.addHighlight(makeEntry(0, 20, 30, {2}));
+  doc.addHighlight(makeEntry(0, 40, 50, {0, 2}));
+
+  doc.removeTag(1);
+
+  ASSERT_EQ(doc.tags().size(), 2u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
+  EXPECT_EQ(doc.tags()[doc.highlights()[1].tagIndices[0]], "gamma");
+  ASSERT_EQ(doc.highlights()[2].tagIndices.size(), 2u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[2].tagIndices[0]], "alpha");
+  EXPECT_EQ(doc.tags()[doc.highlights()[2].tagIndices[1]], "gamma");
+}
+
+TEST(HighlightDocTags, DeletingATagDropsOnlyItsOwnReferences) {
+  HighlightDoc doc;
+  doc.addTag("alpha");
+  doc.addTag("beta");
+  doc.addHighlight(makeEntry(0, 0, 10, {0, 1}));
+  doc.removeTag(0);
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "beta");
+}
+
+TEST(HighlightDocTags, DeletingTheLastTagLeavesHighlightsUntagged) {
+  HighlightDoc doc;
+  doc.addTag("only");
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  doc.removeTag(0);
+  EXPECT_TRUE(doc.tags().empty());
+  EXPECT_TRUE(doc.highlights()[0].tagIndices.empty());
+}
+
+TEST(HighlightDocTags, RemovingAnOutOfRangeIndexIsANoOp) {
+  HighlightDoc doc;
+  doc.addTag("alpha");
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  doc.removeTag(7);
+  ASSERT_EQ(doc.tags().size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
+}
+
+TEST(HighlightDocTags, RenumberingSurvivesARoundTrip) {
+  HighlightDoc doc;
+  doc.addTag("alpha");
+  doc.addTag("beta");
+  doc.addTag("gamma");
+  doc.addHighlight(makeEntry(0, 0, 10, {2}));
+  doc.removeTag(0);
+
+  HighlightDoc parsed;
+  ASSERT_TRUE(roundTrip(doc, parsed));
+  EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "gamma");
+}
+
+TEST(HighlightDocTags, DeletingEveryTagInSequenceNeverLeavesADanglingIndex) {
+  HighlightDoc doc;
+  doc.addTag("a");
+  doc.addTag("b");
+  doc.addTag("c");
+  doc.addHighlight(makeEntry(0, 0, 10, {0, 1, 2}));
+  while (!doc.tags().empty()) {
+    doc.removeTag(0);
+    for (const auto idx : doc.highlights()[0].tagIndices) {
+      EXPECT_LT(static_cast<size_t>(idx), doc.tags().size()) << "dangling index after a delete";
+    }
+  }
+  EXPECT_TRUE(doc.highlights()[0].tagIndices.empty());
+}
