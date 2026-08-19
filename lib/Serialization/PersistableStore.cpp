@@ -6,6 +6,7 @@
 
 #include <cstring>
 #include <limits>
+#include <string>
 
 bool PersistableStoreBase::writeDocToFile(const char* path, const JsonDocument& doc) {
   Storage.mkdir("/.crosspoint");
@@ -13,6 +14,30 @@ bool PersistableStoreBase::writeDocToFile(const char* path, const JsonDocument& 
   serializeJson(doc, json);
   if (!Storage.writeFile(path, json)) {
     LOG_ERR("PERSIST", "Failed to write %s", path);
+    return false;
+  }
+  return true;
+}
+
+bool PersistableStoreBase::writeDocToFileAtomic(const char* path, const JsonDocument& doc) {
+  Storage.mkdir("/.crosspoint");
+  const std::string finalPath = path;
+  const std::string tmpPath = finalPath + ".tmp";
+
+  String json;
+  serializeJson(doc, json);
+
+  if (!Storage.writeFile(tmpPath.c_str(), json)) {
+    LOG_ERR("PERSIST", "Failed to write temp file %s", tmpPath.c_str());
+    return false;
+  }
+
+  // SdFat's rename does not overwrite an existing destination, so drop the old
+  // file first. The brief window where neither exists reads as "no data yet",
+  // which is recoverable; a torn file is not.
+  Storage.remove(finalPath.c_str());
+  if (!Storage.rename(tmpPath.c_str(), finalPath.c_str())) {
+    LOG_ERR("PERSIST", "Failed to rename %s into place", finalPath.c_str());
     return false;
   }
   return true;

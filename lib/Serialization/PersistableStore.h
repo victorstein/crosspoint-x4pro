@@ -49,6 +49,12 @@ class PersistableStoreBase {
   // Serializes doc and writes it to path (ensures /.crosspoint exists). Logs on failure.
   static bool writeDocToFile(const char* path, const JsonDocument& doc);
 
+  // Crash-safe variant of writeDocToFile: serializes to `<path>.tmp`, closes it,
+  // then renames it over `path`. An interrupted write damages only the temp file
+  // instead of tearing the real one. Same discipline as ProgressFile::writeAtomic.
+  // Prefer this for any file whose loss matters (annotations, user data).
+  static bool writeDocToFileAtomic(const char* path, const JsonDocument& doc);
+
   // Reads path and parses it into doc. Returns false silently when the file
   // does not exist (expected on first boot); logs on read/parse failure.
   static bool readDocFromFile(const char* path, JsonDocument& doc);
