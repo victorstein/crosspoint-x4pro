@@ -280,6 +280,21 @@ void PassageSelectActivity::loop() {
   // fires or is dismissed; nothing below applies to word selection anymore.
   if (actionChooser.handleInput(mappedInput, [this] { requestUpdate(); })) return;
 
+  if (phase == Phase::ChoosingAction && !actionChooser.isActive()) {
+    // Popup dismissed without a selection (tap released outside the dialog):
+    // handleInput's dismiss path never invokes the choice callback, so
+    // nothing above resets phase. Without this, every later tap/Confirm/Home
+    // hits commitAt's ChoosingAction no-op forever, and the popup's pixels
+    // are never repainted over since render() takes the differential
+    // fast path. Back the flow out to PickingEnd instead of finishing --
+    // mirrors HighlightsActivity::handleCustomInput's identical case.
+    phase = Phase::PickingEnd;
+    pendingEndIndex = -1;
+    snapshotValid = false;
+    requestUpdate();
+    return;
+  }
+
   if (words.empty()) return;
 
   // Touch: a touch-down moves the cursor to the touched word (differential
