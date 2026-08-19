@@ -222,9 +222,17 @@ Required, not optional:
 1. Read via a streaming/buffered path, or cap the highlight count with a **user-visible**
    error before the limit.
 2. Save with temp-file + rename, following `ProgressFile::writeAtomic` rather than the
-   bookmark path.
+   bookmark path. `PersistableStoreBase::writeDocToFileAtomic` now provides this.
 3. Never overwrite a file that failed to parse — a parse failure must be distinguishable
-   from "no highlights yet."
+   from "no highlights yet." `readDocFromFileChecked` now provides this: only
+   `DocReadStatus::Missing` is safe to overwrite.
+4. **Recover an orphaned `.tmp` on load.** `writeDocToFileAtomic` removes the destination
+   *before* renaming. If the remove succeeds and the rename then fails, the only surviving
+   copy of the data is `<path>.tmp` — and nothing in the codebase ever reads a `.tmp`.
+   For a resume position (`ProgressFile`) that window costs a page number; for annotations
+   it is silent, unrecoverable loss of the exact file the atomic write exists to protect.
+   `HighlightFile::load` must therefore try `<path>.tmp` when the primary path reads
+   `Missing`, and promote it if it parses.
 
 v1's "treat a corrupt file as empty, exactly as bookmarks do" was data loss dressed as
 graceful degradation.

@@ -216,7 +216,10 @@ cmake --build build/test --target BitBlitTest
 ctest --test-dir build/test --output-on-failure -R BitBlit
 ```
 
-Expected: PASS, 6 tests.
+Expected: PASS. The six tests above are the minimum; review added three more
+(exactly-two-byte span, byte-edge-aligned single byte, full row width) to cover branches
+the original six missed — notably `byteEnd == byteStart + 1`, where the middle loop body
+never executes. Final count is 9.
 
 - [ ] **Step 7: Commit**
 
@@ -309,9 +312,22 @@ git add lib/GfxRenderer/GfxRenderer.h lib/GfxRenderer/GfxRenderer.cpp
 git commit -m "feat(gfx): add GfxRenderer::invertRect"
 ```
 
-- [ ] **Step 5: On-device check (record the result in the PR)**
+- [ ] **Step 5: Defer the on-device check** *(revised — see note)*
 
-Flash and confirm a call such as `renderer.invertRect(0, 0, 100, 40)` produces a clean inverted block with no fringing at the left and right edges — the head/tail masks are the likely failure point, and rotation means the physical edges are not always the logical ones.
+> **This step cannot be performed on this branch.** `invertRect` has no callers here by
+> design, so there is nothing to flash and observe without adding throwaway scaffolding.
+> The check moves to the first branch that actually calls it.
+>
+> **Carry forward:** when `PassageSelectActivity` first renders a highlight, confirm a
+> clean inverted block with no fringing at the left and right edges — the head/tail masks
+> are the likely failure point, and rotation means the physical edges are not always the
+> logical ones. Check all four orientations.
+>
+> Worth stating plainly: the clipping/rotation/strip plumbing in
+> `GfxRenderer::invertRect` is the only layer on this branch verified by compile and code
+> reading alone. The bit math beneath it has 9 host tests; the plumbing has none, because
+> it cannot have any. A full precondition trace during final review found no input that
+> violates `bitblit::invertRect`'s contract, but that is review, not test.
 
 ---
 
