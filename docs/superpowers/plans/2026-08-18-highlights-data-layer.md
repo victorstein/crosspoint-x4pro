@@ -853,7 +853,7 @@ pio run -e default
 
 - [ ] **Step 1: Full suite and both boards**
 
-Baseline is **166**. This plan adds 6 (utf8) + 5 (path) + 13 (doc) + 6 (tags) + 7 (file) = **~203**.
+Baseline is **166**. This plan adds 6 (utf8) + 5 (path) + 14 (doc) + 6 (tags) + 7 (file) = **~204**.
 
 - [ ] **Step 2: Confirm the layering holds**
 
