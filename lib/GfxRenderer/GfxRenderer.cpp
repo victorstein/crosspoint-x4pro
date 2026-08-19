@@ -1154,6 +1154,13 @@ void GfxRenderer::invertRect(const int x, const int y, const int width, const in
   if (width <= 0 || height <= 0) return;
   if (fontCacheManager_ && fontCacheManager_->isScanning()) return;
 
+  // The grayscale planes are sparse "drive this pixel with the gray waveform"
+  // masks cleared to 0x00 each pass, not images. XOR-ing a rect across one sets
+  // every background pixel to "drive to gray" and clears the anti-aliased glyph
+  // edges — a solid slab with the glyphs punched out, on every panel. Inverting
+  // is only meaningful on the B/W framebuffer.
+  if (renderMode != BW) return;
+
   // Clip in logical space.
   const int screenW = getScreenWidth();
   const int screenH = getScreenHeight();
