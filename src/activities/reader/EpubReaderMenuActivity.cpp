@@ -17,9 +17,10 @@ namespace fui = freeink::ui;
 EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                const std::string& title, const int currentPage, const int totalPages,
                                                const int bookProgressPercent, const uint8_t currentOrientation,
-                                               const bool hasFootnotes, const bool hasBookmarks)
+                                               const bool hasFootnotes, const bool hasBookmarks,
+                                               const bool hasHighlights)
     : UiListActivity("EpubReaderMenu", renderer, mappedInput),
-      menuItems(buildMenuItems(hasFootnotes, hasBookmarks)),
+      menuItems(buildMenuItems(hasFootnotes, hasBookmarks, hasHighlights)),
       title(title),
       pendingOrientation(currentOrientation),
       currentPage(currentPage),
@@ -41,7 +42,8 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 }
 
 std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuItems(bool hasFootnotes,
-                                                                                     bool hasBookmarks) {
+                                                                                     bool hasBookmarks,
+                                                                                     bool hasHighlights) {
   std::vector<MenuItem> items;
   items.reserve(MAX_MENU_ITEMS);
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
@@ -51,7 +53,18 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   if (hasBookmarks) {
     items.push_back({MenuAction::BOOKMARKS, StrId::STR_BOOKMARKS});
   }
+  // Highlights sits beside bookmarks -- a different browse list, not a
+  // replacement for it. hasHighlights mirrors the caller's own
+  // BOARD_HAS_PSRAM gate (Task 3): on a non-PSRAM board highlightDoc is never
+  // loaded, so offering these entries there would operate on a permanently
+  // empty document.
+  if (hasHighlights) {
+    items.push_back({MenuAction::HIGHLIGHTS, StrId::STR_HIGHLIGHTS});
+  }
   items.push_back({MenuAction::TOGGLE_BOOKMARK, StrId::STR_TOGGLE_BOOKMARK});
+  if (hasHighlights) {
+    items.push_back({MenuAction::HIGHLIGHT_PASSAGE, StrId::STR_HIGHLIGHT_PASSAGE});
+  }
   items.push_back({MenuAction::TEXT_SETTINGS, StrId::STR_TEXT_SETTINGS});
   items.push_back({MenuAction::NIGHT_MODE, StrId::STR_NIGHT_MODE});
   if (Frontlight.present()) {

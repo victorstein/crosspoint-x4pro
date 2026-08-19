@@ -30,9 +30,11 @@
 #include "EpubReaderPercentSelectionActivity.h"
 #include "EpubReaderUtils.h"
 #include "HighlightOverlay.h"
+#include "HighlightsActivity.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
+#include "PassageSelectActivity.h"
 #include "ProgressMapper.h"
 #include "QrDisplayActivity.h"
 #include "ReaderActivity.h"
@@ -258,9 +260,18 @@ void EpubReaderActivity::openReaderMenu() {
     bookProgress = epub->calculateProgress(currentSpineIndex, chapterProgress) * 100.0f;
   }
   const int bookProgressPercent = clampPercent(static_cast<int>(bookProgress + 0.5f));
+  // Mirrors Task 3's own BOARD_HAS_PSRAM gate on loading highlightDoc: on a
+  // non-PSRAM board the document is never loaded, so offering these entries
+  // there would operate on a permanently empty document.
+#if BOARD_HAS_PSRAM
+  constexpr bool hasHighlights = true;
+#else
+  constexpr bool hasHighlights = false;
+#endif
   startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
                              renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-                             SETTINGS.orientation, !currentPageFootnotes.empty(), !cachedBookmarks.empty()),
+                             SETTINGS.orientation, !currentPageFootnotes.empty(), !cachedBookmarks.empty(),
+                             hasHighlights),
                          [this](const ActivityResult& result) {
                            const auto& menu = std::get<MenuResult>(result.data);
                            if (SETTINGS.orientation != menu.orientation) {
@@ -307,6 +318,67 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
                                                                         orientedMarginLeft, orientedMarginTop),
                          [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void EpubReaderActivity::openHighlightPassage() {
+  if (!section) return;
+  auto page = section->loadPage(section->currentPage);
+  if (!page) return;
+
+  int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
+  renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
+                                   &orientedMarginLeft);
+  orientedMarginTop += SETTINGS.screenMargin;
+  orientedMarginLeft += SETTINGS.screenMargin;
+  orientedMarginRight += SETTINGS.screenMargin;
+  // Matches renderContents' own highlightColumnRight (:1446): PassageSelectActivity
+  // derives each line's last-word width from this same right edge, so it must
+  // agree with the margins the page was actually laid out with.
+  const int columnRight = renderer.getScreenWidth() - orientedMarginRight;
+
+  // requestUpdate() is all this handler needs: PassageSelectActivity saves
+  // directly to the live highlightDoc reference and renderContents recomputes
+  // overlay rects from it on every render, so a newly saved highlight appears
+  // on the next repaint with no page turn -- same pattern as
+  // openDictionaryWordSelect above.
+  startActivityForResult(
+      std::make_unique<PassageSelectActivity>(renderer, mappedInput, std::move(page), orientedMarginLeft,
+                                              orientedMarginTop, columnRight, highlightDoc, epub->getPath(),
+                                              static_cast<uint16_t>(currentSpineIndex), highlightsSaveDisabled),
+      [this](const ActivityResult&) { requestUpdate(); });
+}
+
+void EpubReaderActivity::openHighlights() {
+  // Deliberately NOT progressChangeResultHandler (used by the BOOKMARKS case
+  // below): that lambda calls loadCachedBookmarks() and reopens the reader
+  // menu on cancel, both wrong here, and HighlightsActivity's own class
+  // comment already documents that wiring this launch site is Task 7's job.
+  // The result shape (ProgressChangeResult with hasVisibleTextOffset=true) is
+  // genuinely the same alternative progressChangeResultHandler expects, so
+  // reusing its std::get is type-safe -- it is the surrounding side effects
+  // that make reuse wrong, not the ResultVariant alternative.
+  startActivityForResult(
+      std::make_unique<HighlightsActivity>(renderer, mappedInput, highlightDoc, epub->getPath(),
+                                           highlightsSaveDisabled),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) return;
+        const auto& sync = std::get<ProgressChangeResult>(result.data);
+        if (!sync.hasVisibleTextOffset || sync.spineIndex < 0 || sync.spineIndex >= epub->getSpineItemsCount()) {
+          return;
+        }
+        RenderLock lock;
+        clearDeferredReposition();
+        if (section && currentSpineIndex == sync.spineIndex) {
+          const auto page = section->getPageForVisibleTextOffset(sync.visibleTextOffset);
+          section->currentPage = page.value_or(0);
+        } else {
+          currentSpineIndex = sync.spineIndex;
+          pendingOffsetJump = sync.visibleTextOffset;
+          nextPageNumber = 0;
+          section.reset();
+        }
+        requestUpdate();
+      });
 }
 
 void EpubReaderActivity::loop() {
@@ -450,6 +522,12 @@ void EpubReaderActivity::loop() {
         // Confirm already opens the menu on release. This option exists for
         // boards whose capacitive Home key supplies the long-press action.
         break;
+      case CrossPointSettings::LP_MENU_HIGHLIGHT:
+        if (mappedInput.getHeldTime() >= ReaderUtils::BOOKMARK_HOLD_MS) {
+          openHighlightPassage();
+          return;
+        }
+        break;
       case CrossPointSettings::LP_MENU_DISABLED:
       default:
         break;
@@ -479,6 +557,9 @@ void EpubReaderActivity::loop() {
         return;
       case CrossPointSettings::LP_MENU_READER_MENU:
         openReaderMenu();
+        return;
+      case CrossPointSettings::LP_MENU_HIGHLIGHT:
+        openHighlightPassage();
         return;
       case CrossPointSettings::LP_MENU_DISABLED:
       default:
@@ -787,6 +868,14 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::DICTIONARY: {
       openDictionaryWordSelect();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::HIGHLIGHT_PASSAGE: {
+      openHighlightPassage();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::HIGHLIGHTS: {
+      openHighlights();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::DISPLAY_QR: {

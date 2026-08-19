@@ -150,6 +150,13 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     LP_MENU_BOOKMARK = 2,
     LP_MENU_DICTIONARY = 3,
     LP_MENU_READER_MENU = 4,
+    // Choosing this replaces whatever function was previously bound to
+    // long-press -- this setting is a single choice, not additive. Offered on
+    // every board (unlike LP_MENU_READER_MENU, which only makes sense on
+    // Home-key boards); see buildLongPressMenuSetting in SettingsList.h for
+    // how per-board availability is filtered without disturbing this value's
+    // meaning.
+    LP_MENU_HIGHLIGHT = 5,
     LONG_PRESS_MENU_FUNCTION_COUNT
   };
 

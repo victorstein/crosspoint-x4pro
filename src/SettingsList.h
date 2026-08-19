@@ -178,11 +178,79 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
   return s;
 }
 
-inline std::vector<StrId> buildLongPressMenuValues() {
-  static constexpr StrId VALUES[] = {StrId::STR_KOSYNC, StrId::STR_DISABLED, StrId::STR_BOOKMARK_OPTION,
-                                     StrId::STR_DICTIONARY, StrId::STR_READER_MENU};
-  const size_t count = BoardConfig::hasHomeKey() ? std::size(VALUES) : std::size(VALUES) - 1;
-  return {VALUES, VALUES + count};
+// Raw CrossPointSettings::LONG_PRESS_MENU_FUNCTION values this board offers,
+// in ascending order. LP_MENU_READER_MENU is the only one ever excluded: it
+// only makes sense on Home-key boards, where there is no physical Confirm
+// button whose release already opens the reader menu. It sits in the MIDDLE
+// of the enum (4, with LP_MENU_HIGHLIGHT appended after it at 5), so unlike
+// the old "drop the last N" trick, excluding it here does NOT free up a
+// trailing slot for anything else -- the list this returns simply has a gap
+// at 4 on non-Home-key boards. buildLongPressMenuSetting's valueGetter/
+// valueSetter map that gap out of the *displayed* index without ever
+// touching the underlying raw value, so LP_MENU_HIGHLIGHT (5) always means 5
+// in the persisted byte and in EpubReaderActivity's switches, regardless of
+// which position it happens to render at.
+inline std::vector<uint8_t> buildLongPressMenuRawValues() {
+  std::vector<uint8_t> raws;
+  raws.reserve(CrossPointSettings::LONG_PRESS_MENU_FUNCTION_COUNT);
+  for (uint8_t raw = 0; raw < CrossPointSettings::LONG_PRESS_MENU_FUNCTION_COUNT; raw++) {
+    if (raw == CrossPointSettings::LP_MENU_READER_MENU && !BoardConfig::hasHomeKey()) continue;
+    raws.push_back(raw);
+  }
+  return raws;
+}
+
+inline StrId longPressMenuLabelFor(uint8_t raw) {
+  switch (raw) {
+    case CrossPointSettings::LP_MENU_KOSYNC:
+      return StrId::STR_KOSYNC;
+    case CrossPointSettings::LP_MENU_DISABLED:
+      return StrId::STR_DISABLED;
+    case CrossPointSettings::LP_MENU_BOOKMARK:
+      return StrId::STR_BOOKMARK_OPTION;
+    case CrossPointSettings::LP_MENU_DICTIONARY:
+      return StrId::STR_DICTIONARY;
+    case CrossPointSettings::LP_MENU_READER_MENU:
+      return StrId::STR_READER_MENU;
+    case CrossPointSettings::LP_MENU_HIGHLIGHT:
+    default:
+      return StrId::STR_HIGHLIGHT;
+  }
+}
+
+// Built with valueGetter/valueSetter rather than SettingInfo::Enum's plain
+// member-pointer form: SettingsActivity's ENUM path (and the web JSON API's)
+// both store whatever list POSITION the user picks directly into the
+// persisted byte. That is exactly right when the displayed list is the full,
+// contiguous enum -- but buildLongPressMenuRawValues can have a gap at 4, so
+// position and raw value diverge on non-Home-key boards. The getter/setter
+// pair translates between "position in the list this board shows" and "raw
+// LONG_PRESS_MENU_FUNCTION value", so the byte on disk is always the latter.
+inline SettingInfo buildLongPressMenuSetting() {
+  SettingInfo s;
+  s.nameId = StrId::STR_LONG_PRESS_MENU;
+  s.type = SettingType::ENUM;
+  s.key = "longPressMenuFunction";
+  s.category = StrId::STR_CAT_CONTROLS;
+
+  const auto raws = buildLongPressMenuRawValues();
+  s.enumValues.reserve(raws.size());
+  for (const uint8_t raw : raws) s.enumValues.push_back(longPressMenuLabelFor(raw));
+
+  s.valueGetter = [raws]() -> uint8_t {
+    const uint8_t current = SETTINGS.longPressMenuFunction;
+    for (size_t i = 0; i < raws.size(); i++) {
+      if (raws[i] == current) return static_cast<uint8_t>(i);
+    }
+    return 0;  // Stored value isn't offered on this board (e.g. a
+               // LP_MENU_READER_MENU save carried over from different
+               // hardware) -- fall back to the first option rather than
+               // indexing past enumValues.
+  };
+  s.valueSetter = [raws](uint8_t idx) {
+    if (idx < raws.size()) SETTINGS.longPressMenuFunction = raws[idx];
+  };
+  return s;
 }
 
 // Shared settings list used by both the device settings UI and the web settings API.
@@ -312,8 +380,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           {StrId::STR_LONG_PRESS_BEHAVIOR_OFF, StrId::STR_LONG_PRESS_BEHAVIOR_SKIP,
                            StrId::STR_LONG_PRESS_BEHAVIOR_ORIENTATION},
                           "longPressButtonBehavior", StrId::STR_CAT_CONTROLS),
-        SettingInfo::Enum(StrId::STR_LONG_PRESS_MENU, &CrossPointSettings::longPressMenuFunction,
-                          buildLongPressMenuValues(), "longPressMenuFunction", StrId::STR_CAT_CONTROLS),
+        buildLongPressMenuSetting(),
 #if FREEINK_CAP_TOUCH
         SettingInfo::Enum(StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
                           {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH,
