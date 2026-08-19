@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include "DocReadStatus.h"
+
 /**
  * @brief Non-template core of PersistableStore.
  *
@@ -58,6 +60,9 @@ class PersistableStoreBase {
   // Reads path and parses it into doc. Returns false silently when the file
   // does not exist (expected on first boot); logs on read/parse failure.
   static bool readDocFromFile(const char* path, JsonDocument& doc);
+
+  // As readDocFromFile, but reports why the read failed.
+  static DocReadStatus readDocFromFileChecked(const char* path, JsonDocument& doc);
 
  protected:
   /**

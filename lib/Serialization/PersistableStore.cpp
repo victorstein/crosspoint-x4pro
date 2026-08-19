@@ -43,21 +43,25 @@ bool PersistableStoreBase::writeDocToFileAtomic(const char* path, const JsonDocu
   return true;
 }
 
-bool PersistableStoreBase::readDocFromFile(const char* path, JsonDocument& doc) {
+DocReadStatus PersistableStoreBase::readDocFromFileChecked(const char* path, JsonDocument& doc) {
   if (!Storage.exists(path)) {
-    return false;  // Expected on first boot — not an error.
+    return DocReadStatus::Missing;  // Expected on first boot — not an error.
   }
   String json = Storage.readFile(path);
   if (json.isEmpty()) {
     LOG_ERR("PERSIST", "Failed to read %s (empty)", path);
-    return false;
+    return DocReadStatus::Unreadable;
   }
-  auto error = deserializeJson(doc, json);
+  const auto error = deserializeJson(doc, json);
   if (error) {
     LOG_ERR("PERSIST", "JSON parse error in %s: %s", path, error.c_str());
-    return false;
+    return DocReadStatus::ParseError;
   }
-  return true;
+  return DocReadStatus::Ok;
+}
+
+bool PersistableStoreBase::readDocFromFile(const char* path, JsonDocument& doc) {
+  return readDocFromFileChecked(path, doc) == DocReadStatus::Ok;
 }
 
 std::string PersistableStoreBase::extractPassword(JsonVariantConst doc, bool& needsResave) {
