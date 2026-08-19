@@ -244,6 +244,11 @@ bool EpubReaderActivity::loadBook() {
       ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
       break;
   }
+#else
+  // highlightDoc is never loaded on non-PSRAM boards -- disable saving so no
+  // path (e.g. PassageSelectActivity) can call HighlightFile::save on a
+  // document that was never populated and would overwrite the real file.
+  highlightsSaveDisabled = true;
 #endif
 
   return true;

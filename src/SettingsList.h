@@ -179,8 +179,8 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
 }
 
 // Raw CrossPointSettings::LONG_PRESS_MENU_FUNCTION values this board offers,
-// in ascending order. LP_MENU_READER_MENU is the only one ever excluded: it
-// only makes sense on Home-key boards, where there is no physical Confirm
+// in ascending order. LP_MENU_READER_MENU is excluded on boards without a
+// Home key: it only makes sense there, where there is no physical Confirm
 // button whose release already opens the reader menu. It sits in the MIDDLE
 // of the enum (4, with LP_MENU_HIGHLIGHT appended after it at 5), so unlike
 // the old "drop the last N" trick, excluding it here does NOT free up a
@@ -190,12 +190,22 @@ inline SettingInfo buildDictionarySetting(const std::vector<DictionaryEntry>& di
 // touching the underlying raw value, so LP_MENU_HIGHLIGHT (5) always means 5
 // in the persisted byte and in EpubReaderActivity's switches, regardless of
 // which position it happens to render at.
+//
+// LP_MENU_HIGHLIGHT is additionally excluded on boards without PSRAM:
+// EpubReaderActivity::loadBook never loads highlightDoc there (it's gated on
+// BOARD_HAS_PSRAM too), so offering the option would let PassageSelectActivity
+// operate on a permanently empty document and overwrite a real highlights
+// file on save.
 inline std::vector<uint8_t> buildLongPressMenuRawValues() {
   std::vector<uint8_t> raws;
   raws.reserve(CrossPointSettings::LONG_PRESS_MENU_FUNCTION_COUNT);
   for (uint8_t raw = 0; raw < CrossPointSettings::LONG_PRESS_MENU_FUNCTION_COUNT; raw++) {
     if (raw == CrossPointSettings::LP_MENU_READER_MENU && !BoardConfig::hasHomeKey()) continue;
+#if BOARD_HAS_PSRAM
     raws.push_back(raw);
+#else
+    if (raw != CrossPointSettings::LP_MENU_HIGHLIGHT) raws.push_back(raw);
+#endif
   }
   return raws;
 }
