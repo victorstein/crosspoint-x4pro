@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "activities/ActivityResult.h"
 #include "activities/UiListActivity.h"
 #include "components/OptionPopup.h"
 
@@ -26,19 +27,31 @@
 // reason to cap how many tags narrow the list and has nothing to gain from
 // minting a tag no highlight has yet.
 //
-// Deleting is the only destructive action in the feature: a long-press (touch)
-// or a held Confirm release (physical buttons) opens a Cancel/Delete
-// OptionPopup, mirroring EpubReaderBookmarksActivity exactly. On confirm,
-// HighlightDoc::removeHighlight runs first and HighlightFile::save second; if
-// the save fails the just-removed entry is re-added via addHighlight so the
-// resident doc never diverges from what's on disk (matching
-// PassageSelectActivity::finalizeSelection's own rollback on a failed save).
-// Because addHighlight only appends, a rolled-back entry lands at the end of
-// the vector rather than back at its original position -- accepted here since
-// the alternative (copying the whole document, up to
+// A long-press (touch) or a held Confirm release (physical buttons) on a
+// highlight row opens a Tags.../Delete/Cancel OptionPopup (actionChooser_),
+// not the delete confirmation directly -- editing tags is the other action
+// this screen offers. Choosing "Tags..." pushes TagPickerActivity seeded with
+// the entry's current tagIndices as its initialSelection; choosing "Delete"
+// forces a synchronous clean repaint (requestUpdateAndWait) before opening
+// confirmPopup_, since actionChooser_'s three rows are taller than
+// confirmPopup_'s two and would otherwise frame it with leftover pixels.
+// actionChooser_ and confirmPopup_ are two separate OptionPopup members --
+// never the same one reused -- because OptionPopup::show() reassigns
+// onSelectCallback and is invoked AS that member, so calling show() again
+// from inside a running callback would destroy the closure still executing.
+//
+// Deleting is the only destructive, irreversible-on-disk action in the
+// feature: on confirm, HighlightDoc::removeHighlight runs first and
+// HighlightFile::save second; if the save fails the just-removed entry is
+// re-added via addHighlight so the resident doc never diverges from what's on
+// disk (matching PassageSelectActivity::finalizeSelection's own rollback on a
+// failed save). Because addHighlight only appends, a rolled-back entry lands
+// at the end of the vector rather than back at its original position --
+// accepted here since the alternative (copying the whole document, up to
 // HighlightDoc::MAX_HIGHLIGHTS entries, to save one) is the exact memory
 // pressure this feature is built to avoid on the C3. This path only runs on
-// a save failure, which is rare.
+// a save failure, which is rare. Retagging (HighlightDoc::setTags) is
+// likewise rolled back to the entry's previous tagIndices on a failed save.
 //
 // Jumping does NOT route through EpubReaderActivity's
 // progressChangeResultHandler -- that lambda opens with
@@ -96,6 +109,10 @@ class HighlightsActivity final : public UiListActivity {
 
   void cycleTagFilter();
   void jumpToHighlight(size_t docIndex);
+  void showActionChooser(size_t docIndex);
+  void editTags(size_t docIndex);
+  void applyTagEdit(size_t docIndex, std::vector<uint16_t> previousTags, size_t tagsBefore,
+                    const ActivityResult& result);
   void showDeleteConfirmation(size_t docIndex);
   void deleteHighlight(size_t docIndex);
 
@@ -123,4 +140,12 @@ class HighlightsActivity final : public UiListActivity {
   // exact entry that was long-pressed rather than re-deriving it from
   // whatever nav.selected happens to be by the time the popup resolves.
   size_t pendingDeleteIndex_ = 0;
+
+  // Separate from confirmPopup_ on purpose -- see the class comment.
+  bool choosingAction_ = false;
+  OptionPopup actionChooser_;
+  // Doc index captured when the action chooser opens, so its callback (Tags...
+  // or Delete) dispatches on the exact entry that was long-pressed, same
+  // reasoning as pendingDeleteIndex_ above.
+  size_t pendingActionIndex_ = 0;
 };

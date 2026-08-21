@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <utility>
+#include <variant>
 
 #include "../../util/HighlightFile.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "TagPickerActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -130,7 +132,7 @@ void HighlightsActivity::jumpToHighlight(const size_t docIndex) {
 }
 
 void HighlightsActivity::activateIndex(const int index) {
-  if (confirmPopup_.isActive()) return;
+  if (confirmPopup_.isActive() || actionChooser_.isActive()) return;
   if (index < 0 || index >= listCount()) return;
   activeNav().selected = index;
 
@@ -146,15 +148,148 @@ void HighlightsActivity::activateIndex(const int index) {
 }
 
 void HighlightsActivity::onRowLongPress(const int index) {
-  if (confirmPopup_.isActive()) return;
-  if (index <= 0 || index >= listCount()) return;  // row 0 is the filter control; nothing to delete
+  if (confirmPopup_.isActive() || actionChooser_.isActive()) return;
+  if (index <= 0 || index >= listCount()) return;  // row 0 is the filter control; nothing to act on
   app.clearTapFlash();
   activeNav().selected = index;
-  showDeleteConfirmation(visibleIndices_[static_cast<size_t>(index - 1)]);
+  showActionChooser(visibleIndices_[static_cast<size_t>(index - 1)]);
+}
+
+void HighlightsActivity::showActionChooser(const size_t docIndex) {
+  if (confirmPopup_.isActive() || actionChooser_.isActive()) return;
+
+  pendingActionIndex_ = docIndex;
+  choosingAction_ = true;
+
+  if (saveDisabled_) {
+    // Retagging writes the document, so a book whose file failed to load
+    // (the resident doc was built from scratch this session) must never see
+    // "Tags..." at all -- omit it rather than offer it and bail inside
+    // editTags. Delete still shows: showDeleteConfirmation carries its own
+    // saveDisabled_ bail below, same as before this task.
+    const char* options[] = {tr(STR_DELETE), tr(STR_CANCEL)};
+    actionChooser_.show(tr(STR_HIGHLIGHT_ACTIONS), options, 2, 0, [this](const int idx) {
+      choosingAction_ = false;
+      if (idx == 0) {
+        // See the "clean repaint" comment below for why this precedes
+        // showDeleteConfirmation.
+        requestUpdateAndWait();
+        showDeleteConfirmation(pendingActionIndex_);
+      }
+      requestUpdate();
+    });
+  } else {
+    const char* options[] = {tr(STR_EDIT_TAGS), tr(STR_DELETE), tr(STR_CANCEL)};
+    actionChooser_.show(tr(STR_HIGHLIGHT_ACTIONS), options, 3, 0, [this](const int idx) {
+      choosingAction_ = false;
+      if (idx == 0) {
+        // Pushes a whole new activity, which repaints the screen from
+        // scratch on entry -- no leftover-chooser-pixels hazard here.
+        editTags(pendingActionIndex_);
+      } else if (idx == 1) {
+        // actionChooser_ (3 rows) is taller than confirmPopup_ (2 rows) and
+        // both draw over the current screen without clearing it
+        // (OptionPopup's class comment), so confirmPopup_ would otherwise be
+        // framed by actionChooser_'s leftover pixels. Force one synchronous
+        // clean repaint of the underlying list -- with neither popup active
+        // -- before showDeleteConfirmation shows confirmPopup_ on top of it.
+        // Safe from inside this callback: it runs on the loop task with no
+        // RenderLock held (ActivityManager.cpp's three requestUpdateAndWait
+        // asserts all pass here), mirroring
+        // PassageSelectActivity::showActionChooser's identical use.
+        requestUpdateAndWait();
+        showDeleteConfirmation(pendingActionIndex_);
+      }
+      requestUpdate();
+    });
+  }
+  requestUpdate();
+}
+
+void HighlightsActivity::editTags(const size_t docIndex) {
+  if (docIndex >= highlightDoc_.highlights().size()) return;  // stale index; nothing to do
+  if (saveDisabled_) {
+    // Defense in depth: showActionChooser already omits "Tags..." in this
+    // state, but mirror showDeleteConfirmation's own bail so this method is
+    // safe to call regardless of how it's reached.
+    ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
+    requestUpdate();
+    return;
+  }
+
+  // clearTapFlash is what the row-tap pushes do (activateIndex, above)
+  // because a row flash is what lingers. This push comes from a popup
+  // button, so it is optional here -- PassageSelectActivity::startTagFlow
+  // pushes the same activity from a popup callback without it.
+  app.clearTapFlash();
+  const std::vector<uint16_t> initialSelection = highlightDoc_.highlights()[docIndex].tagIndices;
+  const size_t tagsBefore = highlightDoc_.tags().size();
+  startActivityForResult(
+      std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_,
+                                          initialSelection),
+      [this, docIndex, initialSelection, tagsBefore](const ActivityResult& result) {
+        applyTagEdit(docIndex, initialSelection, tagsBefore, result);
+      });
+}
+
+void HighlightsActivity::applyTagEdit(const size_t docIndex, std::vector<uint16_t> previousTags,
+                                      const size_t tagsBefore, const ActivityResult& result) {
+  // A size_t doc index is stable across the picker push: removeTag erases
+  // from tags_ and rewrites tagIndices in place but never resizes or
+  // reorders highlights_, and TagPickerActivity calls neither addHighlight
+  // nor removeHighlight. Bounds-checked anyway, defensively.
+  if (!result.isCancelled && docIndex < highlightDoc_.highlights().size()) {
+    // -fno-exceptions means a mismatched alternative aborts with no
+    // recovery, so this must never run on the cancelled path.
+    const auto& selection = std::get<TagSelectionResult>(result.data);
+    highlightDoc_.setTags(docIndex, selection.tagIndices);
+
+    if (!saveDisabled_) {
+      switch (HighlightFile::save(bookPath_, highlightDoc_)) {
+        case HighlightFile::SaveResult::Ok:
+          break;
+        case HighlightFile::SaveResult::TooLarge:
+          // Never leave the resident doc holding tags that aren't actually on
+          // disk -- restore the entry's previous tagIndices, mirroring
+          // deleteHighlight's own rollback on a failed save.
+          highlightDoc_.setTags(docIndex, previousTags);
+          ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_TOO_LARGE));
+          break;
+        case HighlightFile::SaveResult::WriteFailed:
+          highlightDoc_.setTags(docIndex, previousTags);
+          ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_SAVE_FAILED));
+          break;
+      }
+    }
+  }
+
+  // The picker persists palette changes (new tags, tag deletion) itself, so
+  // even a user who backed out of this edit (isCancelled) may have already
+  // changed highlightDoc_.tags() on disk -- reconcile below on BOTH paths.
+  if (highlightDoc_.tags().size() != tagsBefore) {
+    // A range check is NOT enough: deleting a tag BELOW filterTagIndex_
+    // leaves the index in range but silently pointing at a different tag.
+    // Any size change means the numbering moved, and there is no way to
+    // recover which tag the user meant -- so reset to "All".
+    filterTagIndex_ = std::nullopt;
+  }
+  {
+    // rebuildVisibleIndices/rebuildRowItems refill the vector buildScreen
+    // hands the render task as rowItems_.data(); the render lock is
+    // explicitly released before this handler runs (ActivityManager.cpp),
+    // so nothing else serialises this against a concurrent render.
+    RenderLock lock(*this);
+    rebuildVisibleIndices();
+    rebuildRowItems();
+  }
+  // The rebuild can shrink visibleIndices_ (filter reset above, or the
+  // filtered tag itself deleted); moveSelectionTo issues its own
+  // requestUpdate().
+  moveSelectionTo(std::clamp(activeNav().selected, 0, listCount() - 1));
 }
 
 void HighlightsActivity::showDeleteConfirmation(const size_t docIndex) {
-  if (confirmPopup_.isActive()) return;
+  if (confirmPopup_.isActive() || actionChooser_.isActive()) return;
   if (saveDisabled_) {
     // The file may still hold the user's data (HighlightFile::LoadResult::Failed);
     // never let a delete through in that state, matching PassageSelectActivity's
@@ -218,6 +353,15 @@ void HighlightsActivity::deleteHighlight(const size_t docIndex) {
 }
 
 bool HighlightsActivity::handleCustomInput() {
+  if (actionChooser_.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
+  if (choosingAction_) {
+    // Popup dismissed without a selection (Back button/gesture, or a tap
+    // outside it): cancel the pending action, stay on this screen.
+    choosingAction_ = false;
+    requestUpdate();
+    return true;
+  }
+
   if (confirmPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
   if (confirmingDelete_) {
     // Popup dismissed without a selection (Back button/gesture, or a tap
@@ -310,6 +454,11 @@ void HighlightsActivity::render(RenderLock&&) {
     renderUi();
   }
 
+  // Chooser first: processRender paints the dialog AND calls
+  // renderer.displayBuffer(), returning true (OptionPopup.h) -- calling both
+  // and falling through would paint the footer over the dialog and trigger a
+  // second e-ink refresh.
+  if (actionChooser_.processRender(renderer, mappedInput)) return;
   if (confirmPopup_.processRender(renderer, mappedInput)) return;
 
   drawFooter();
