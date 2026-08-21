@@ -127,7 +127,15 @@ void TagPickerActivity::startNewTagFlow() {
     const auto& keyboard = std::get<KeyboardResult>(result.data);
 
     const size_t before = highlightDoc.tags().size();
-    const auto tagIndex = highlightDoc.addTag(keyboard.text);
+    std::optional<uint16_t> tagIndex;
+    {
+      // buildScreen (render task) latches item.label = tags[i].c_str() every
+      // call; push_back may reallocate tags_, stranding any pointer a
+      // concurrent render already took. Fence the mutation itself, matching
+      // deleteTag's own RenderLock below.
+      RenderLock lock(*this);
+      tagIndex = highlightDoc.addTag(keyboard.text);
+    }
     if (!tagIndex) {
       reportAddTagFailure(keyboard.text);
       return;
@@ -145,8 +153,14 @@ void TagPickerActivity::startNewTagFlow() {
         case HighlightFile::SaveResult::WriteFailed:
           // Roll back ONLY a genuinely new tag. A dedupe hit added nothing,
           // so there is nothing to undo -- and removeTag would strip a tag
-          // the user already had off every highlight in the book.
-          highlightDoc.removeTag(*tagIndex);
+          // the user already had off every highlight in the book. erase()
+          // destroys a std::string and shifts the rest, dangling any
+          // const char* a concurrent buildScreen already latched -- fence it,
+          // but never across HighlightFile::save (see deleteTag's own note).
+          {
+            RenderLock lock(*this);
+            highlightDoc.removeTag(*tagIndex);
+          }
           ReaderUtils::showMessage(renderer, tr(STR_TAG_SAVE_FAILED));
           requestUpdate();
           return;
