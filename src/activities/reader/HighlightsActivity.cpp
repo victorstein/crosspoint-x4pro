@@ -223,16 +223,16 @@ void HighlightsActivity::editTags(const size_t docIndex) {
   // pushes the same activity from a popup callback without it.
   app.clearTapFlash();
   const std::vector<uint16_t> initialSelection = highlightDoc_.highlights()[docIndex].tagIndices;
-  const size_t tagsBefore = highlightDoc_.tags().size();
+  const std::string filterTagName = filterTagIndex_ ? highlightDoc_.tags()[*filterTagIndex_] : std::string();
   startActivityForResult(
       std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_,
                                           initialSelection),
-      [this, docIndex, tagsBefore](const ActivityResult& result) {
-        applyTagEdit(docIndex, tagsBefore, result);
+      [this, docIndex, filterTagName](const ActivityResult& result) {
+        applyTagEdit(docIndex, filterTagName, result);
       });
 }
 
-void HighlightsActivity::applyTagEdit(const size_t docIndex, const size_t tagsBefore,
+void HighlightsActivity::applyTagEdit(const size_t docIndex, const std::string& filterTagName,
                                       const ActivityResult& result) {
   // A size_t doc index is stable across the picker push: removeTag erases
   // from tags_ and rewrites tagIndices in place but never resizes or
@@ -270,12 +270,14 @@ void HighlightsActivity::applyTagEdit(const size_t docIndex, const size_t tagsBe
   // The picker persists palette changes (new tags, tag deletion) itself, so
   // even a user who backed out of this edit (isCancelled) may have already
   // changed highlightDoc_.tags() on disk -- reconcile below on BOTH paths.
-  if (highlightDoc_.tags().size() != tagsBefore) {
-    // A range check is NOT enough: deleting a tag BELOW filterTagIndex_
-    // leaves the index in range but silently pointing at a different tag.
-    // Any size change means the numbering moved, and there is no way to
-    // recover which tag the user meant -- so reset to "All".
-    filterTagIndex_ = std::nullopt;
+  // Reconcile by name, not by index or count: the picker can delete AND add in
+  // one visit, leaving the size unchanged while the numbering shifts underneath.
+  if (filterTagIndex_) {
+    const auto& tags = highlightDoc_.tags();
+    const auto it = std::find(tags.begin(), tags.end(), filterTagName);
+    filterTagIndex_ = (it == tags.end())
+                          ? std::nullopt
+                          : std::optional<uint16_t>(static_cast<uint16_t>(std::distance(tags.begin(), it)));
   }
   {
     // rebuildVisibleIndices/rebuildRowItems refill the vector buildScreen
