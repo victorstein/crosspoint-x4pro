@@ -22,13 +22,18 @@
 // Done gesture, committing the current selection. Back cancels
 // (isCancelled=true, selection discarded), matching both PassageSelectActivity's
 // precedent and the codebase-wide Back=cancel convention. A tag created via
-// "New tag..." is added to the book's palette immediately, via
-// HighlightDoc::addTag, and is NOT rolled back on cancel -- the palette is
-// book-wide state, independent of which highlight ends up tagged.
+// "New tag..." is added to the book's palette AND persisted to disk
+// immediately (HighlightFile::save, unless saveDisabled) -- the palette is
+// book-wide state, independent of which highlight ends up tagged, so a
+// highlight cancelled after this point must not take the new tag down with
+// it. If that save fails, the just-added tag is rolled back via removeTag;
+// a dedupe hit (addTag returning an existing index rather than adding one)
+// is never rolled back, since nothing new was added and removeTag would
+// strip a pre-existing tag off every highlight in the book.
 class TagPickerActivity final : public UiListActivity {
  public:
   explicit TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
-                              std::vector<uint16_t> initialSelection = {});
+                              std::string bookPath, bool saveDisabled, std::vector<uint16_t> initialSelection = {});
 
   void onEnter() override;
   bool handleHomeGesture() override;
@@ -49,6 +54,8 @@ class TagPickerActivity final : public UiListActivity {
   void commitAndFinish();
 
   HighlightDoc& highlightDoc;
+  const std::string bookPath_;
+  const bool saveDisabled_;
   std::vector<uint16_t> initialSelection_;
 
   // Index-aligned with highlightDoc.tags(). Fixed at MAX_TAGS capacity: the

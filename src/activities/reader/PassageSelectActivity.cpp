@@ -197,7 +197,8 @@ void PassageSelectActivity::showActionChooser(const int endIndex) {
 }
 
 void PassageSelectActivity::startTagFlow(const int endIndex) {
-  startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc),
+  startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc, bookPath,
+                                                              saveDisabled),
                          [this, endIndex](const ActivityResult& result) {
                            // Cancelling the picker discards only the TAG
                            // selection, not the highlight itself -- the

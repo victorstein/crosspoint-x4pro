@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "../../util/HighlightFile.h"
 #include "../util/KeyboardEntryActivity.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
@@ -14,9 +15,12 @@
 namespace fui = freeink::ui;
 
 TagPickerActivity::TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                      HighlightDoc& highlightDoc, std::vector<uint16_t> initialSelection)
+                                      HighlightDoc& highlightDoc, std::string bookPath, bool saveDisabled,
+                                      std::vector<uint16_t> initialSelection)
     : UiListActivity("TagPicker", renderer, mappedInput),
       highlightDoc(highlightDoc),
+      bookPath_(std::move(bookPath)),
+      saveDisabled_(saveDisabled),
       initialSelection_(std::move(initialSelection)) {}
 
 void TagPickerActivity::onEnter() {
@@ -115,6 +119,7 @@ void TagPickerActivity::startNewTagFlow() {
     if (result.isCancelled) return;
     const auto& keyboard = std::get<KeyboardResult>(result.data);
 
+    const size_t before = highlightDoc.tags().size();
     const auto tagIndex = highlightDoc.addTag(keyboard.text);
     if (!tagIndex) {
       reportAddTagFailure(keyboard.text);
@@ -124,6 +129,23 @@ void TagPickerActivity::startNewTagFlow() {
     // addTag dedupes by name, so an existing tag with this name comes back
     // as its existing index rather than a new row. Either way, going
     // through "New tag..." reads as intent to apply it to this highlight.
+    const bool grew = highlightDoc.tags().size() > before;
+    if (grew && !saveDisabled_) {
+      switch (HighlightFile::save(bookPath_, highlightDoc)) {
+        case HighlightFile::SaveResult::Ok:
+          break;
+        case HighlightFile::SaveResult::TooLarge:
+        case HighlightFile::SaveResult::WriteFailed:
+          // Roll back ONLY a genuinely new tag. A dedupe hit added nothing,
+          // so there is nothing to undo -- and removeTag would strip a tag
+          // the user already had off every highlight in the book.
+          highlightDoc.removeTag(*tagIndex);
+          ReaderUtils::showMessage(renderer, tr(STR_TAG_SAVE_FAILED));
+          requestUpdate();
+          return;
+      }
+    }
+
     selected_[*tagIndex] = true;
     requestUpdate();
   };
