@@ -51,6 +51,21 @@ bool HighlightDoc::removeHighlight(size_t index) {
   return true;
 }
 
+bool HighlightDoc::setTags(size_t index, std::vector<uint16_t> tagIndices) {
+  if (index >= highlights_.size()) return false;
+
+  std::vector<uint16_t> deduped;
+  for (const uint16_t ref : tagIndices) {
+    if (static_cast<size_t>(ref) >= tags_.size()) continue;
+    if (std::find(deduped.begin(), deduped.end(), ref) != deduped.end()) continue;
+    if (deduped.size() >= static_cast<size_t>(MAX_TAGS_PER_HIGHLIGHT)) break;
+    deduped.push_back(ref);
+  }
+
+  highlights_[index].tagIndices = std::move(deduped);
+  return true;
+}
+
 std::vector<const HighlightEntry*> HighlightDoc::findBySpine(uint16_t spineIndex) const {
   std::vector<const HighlightEntry*> found;
   for (const auto& h : highlights_) {

@@ -41,6 +41,17 @@ class HighlightDoc {
   bool addHighlight(HighlightEntry entry);
   bool removeHighlight(size_t index);
 
+  // Replaces entry `index`'s tags. Returns false when `index` is out of range;
+  // the entry is untouched in that case.
+  //
+  // Drops references outside the palette, collapses repeats, and caps at
+  // MAX_TAGS_PER_HIGHLIGHT. Note this is deliberately STRICTER than the parse
+  // path: fromJson drops out-of-range refs and caps, but does NOT dedupe
+  // (HighlightDoc.cpp:111-117), so {"t":[0,0,0]} parses to three copies. A UI
+  // caller can produce repeats by toggling; JSON on disk comes from toJson,
+  // which never emits them.
+  bool setTags(size_t index, std::vector<uint16_t> tagIndices);
+
   // Highlights in the given spine item, in stored order. The render pass needs
   // this every page turn.
   std::vector<const HighlightEntry*> findBySpine(uint16_t spineIndex) const;

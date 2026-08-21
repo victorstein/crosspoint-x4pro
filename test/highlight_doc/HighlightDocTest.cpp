@@ -269,3 +269,96 @@ TEST(HighlightDocTags, DeletingEveryTagInSequenceNeverLeavesADanglingIndex) {
   }
   EXPECT_TRUE(doc.highlights()[0].tagIndices.empty());
 }
+
+TEST(HighlightDocSetTags, ReplacesAnEntrysTags) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  ASSERT_TRUE(doc.addTag("beta").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+
+  ASSERT_TRUE(doc.setTags(0, {1}));
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "beta") << "the old tag must be replaced, not merged";
+}
+
+TEST(HighlightDocSetTags, ClearsTagsWithAnEmptyList) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  ASSERT_TRUE(doc.setTags(0, {}));
+  EXPECT_TRUE(doc.highlights()[0].tagIndices.empty());
+}
+
+TEST(HighlightDocSetTags, RejectsAnOutOfRangeEntryIndexWithoutTouchingAnything) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+
+  EXPECT_FALSE(doc.setTags(7, {}));
+  EXPECT_FALSE(doc.setTags(1, {})) << "one past the end is out of range";
+  // Entry 0 must be intact afterwards. This is an off-by-one test, not an
+  // atomicity test: an implementation that cleared highlights_[index] before
+  // range-checking would write out of bounds at [7]/[1] and never touch entry 0,
+  // so only a sanitiser build catches that.
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
+}
+
+TEST(HighlightDocSetTags, DropsTagIndicesOutsideThePalette) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10));
+
+  ASSERT_TRUE(doc.setTags(0, {0, 9}));
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u) << "index 9 has no tag and must not survive";
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
+}
+
+TEST(HighlightDocSetTags, CapsAtMaxTagsPerHighlight) {
+  HighlightDoc doc;
+  for (size_t i = 0; i < HighlightDoc::MAX_TAGS_PER_HIGHLIGHT + 2; ++i) {
+    ASSERT_TRUE(doc.addTag("t" + std::to_string(i)).has_value());
+  }
+  doc.addHighlight(makeEntry(0, 0, 10));
+
+  std::vector<uint16_t> many;
+  for (size_t i = 0; i < HighlightDoc::MAX_TAGS_PER_HIGHLIGHT + 2; ++i) many.push_back(static_cast<uint16_t>(i));
+  ASSERT_TRUE(doc.setTags(0, many));
+  EXPECT_EQ(doc.highlights()[0].tagIndices.size(), HighlightDoc::MAX_TAGS_PER_HIGHLIGHT);
+}
+
+TEST(HighlightDocSetTags, DeduplicatesRepeatedIndices) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10));
+  ASSERT_TRUE(doc.setTags(0, {0, 0, 0}));
+  EXPECT_EQ(doc.highlights()[0].tagIndices.size(), 1u) << "a repeated index must not consume the per-highlight cap";
+}
+
+TEST(HighlightDocSetTags, TouchesOnlyTheNamedEntry) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  ASSERT_TRUE(doc.addTag("beta").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  doc.addHighlight(makeEntry(0, 20, 30, {0}));
+
+  ASSERT_TRUE(doc.setTags(1, {1}));
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  ASSERT_EQ(doc.highlights()[1].tagIndices.size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha") << "the first entry must be untouched";
+  EXPECT_EQ(doc.tags()[doc.highlights()[1].tagIndices[0]], "beta");
+}
+
+TEST(HighlightDocSetTags, SurvivesARoundTrip) {
+  HighlightDoc doc;
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  ASSERT_TRUE(doc.addTag("beta").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+  ASSERT_TRUE(doc.setTags(0, {1}));
+
+  HighlightDoc parsed;
+  ASSERT_TRUE(roundTrip(doc, parsed));
+  ASSERT_EQ(parsed.highlights().size(), 1u) << "the entry itself must survive the round trip";
+  ASSERT_EQ(parsed.highlights()[0].tagIndices.size(), 1u);
+  EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "beta");
+}
