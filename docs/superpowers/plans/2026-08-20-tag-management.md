@@ -12,7 +12,7 @@
 
 **Delivery:** fork-only.
 
-> **v2 — revised after adversarial review.** v1 contained four instructions that would have shipped broken behaviour (a rollback that deletes a pre-existing tag, a long-press that is dead on arrival, nested popups that free the running callback, and a `selected_` reset that wipes the user's tags), two guaranteed build/verification failures, and three misdiagnoses that would have put defensive code in the wrong place while leaving the real stale state untouched. All corrected below.
+> **v3 — revised after two adversarial reviews.** v1 contained four instructions that would have shipped broken behaviour (a rollback that deletes a pre-existing tag, a long-press that is dead on arrival, nested popups that free the running callback, and a `selected_` reset that wipes the user's tags), two guaranteed build/verification failures, and three misdiagnoses that would have put defensive code in the wrong place while leaving the real stale state untouched. All corrected below.
 
 ---
 
@@ -149,12 +149,15 @@ TEST(HighlightDocSetTags, SurvivesARoundTrip) {
 
   HighlightDoc parsed;
   ASSERT_TRUE(roundTrip(doc, parsed));
+  ASSERT_EQ(parsed.highlights().size(), 1u) << "the entry itself must survive the round trip";
   ASSERT_EQ(parsed.highlights()[0].tagIndices.size(), 1u);
   EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "beta");
 }
 ```
 
-Every `[0]` dereference is now preceded by an `ASSERT_EQ` on size — against a regression these must fail red, not over-read the heap.
+Every container is size-asserted before it is indexed, including `parsed.highlights()` itself — against a regression these must fail red rather than over-read a vector.
+
+> **On `RejectsAnOutOfRangeEntryIndexWithoutTouchingAnything`:** be honest about what it proves. It is a real off-by-one test — `EXPECT_FALSE(doc.setTags(1, {}))` catches a `<=` where `<` belongs. It does **not** prove atomicity: an implementation that grabbed `highlights_[index]` and cleared it *before* range-checking would write out of bounds at `[7]`/`[1]`, never touching entry 0, and would still pass. Only a sanitiser build catches that. Do not write a comment claiming otherwise.
 
 `makeEntry(uint16_t, uint32_t, uint32_t, std::vector<uint16_t> = {})` is at `HighlightDocTest.cpp:9-17`; `roundTrip(const HighlightDoc&, HighlightDoc&)` at `:20-28`. Both signatures verified.
 
@@ -255,6 +258,24 @@ v1 said "`UiListActivity` already provides `onRowLongPress` — follow the idiom
 2. **Input mask.** `TagPickerActivity.cpp:75` sets `props.inputMask = fui::InputTouch;`. It must be `fui::InputTouch | fui::InputLongPress` (`HighlightsActivity.cpp:293`).
 3. **Popup member + routing.** Add `OptionPopup confirmPopup_;` and `bool confirmingDelete_ = false;`, plus a `handleCustomInput()` override — the base returns `false` (`UiListActivity.h:56`).
 4. **Render seam.** `UiListActivity::render()` (`UiListActivity.cpp:151-167`) has no seam to interleave a popup. `HighlightsActivity` had to duplicate the whole body and says so (`HighlightsActivity.cpp:299-303`). Add the same `render(RenderLock&&)` override, popup drawn between the app render and the footer.
+5. **A physical-button path.** The four above are all *touch* plumbing. On a board where `MappedInputManager::hasTouch()` is false (`MappedInputManager.cpp:128`) — reachable on `default` — long-press does not exist and tag deletion would be **unreachable while both boards build green**, the exact failure this task was written to eliminate. `HighlightsActivity` needed a fifth change for this and it is in the same file (`HighlightsActivity.cpp:238-249`):
+
+```cpp
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    const int selected = activeNav().selected;
+    if (selected < 0 || selected >= listCount()) return true;
+    if (selected > 0 && mappedInput.getHeldTime() > ENTER_DELETE_MODE_MS) {
+      onRowLongPress(selected);
+    } else {
+      activateIndex(selected);
+    }
+    return true;
+  }
+```
+
+`TagPickerActivity` has no `handleButtons` override today, so Confirm falls through to the base (`UiListActivity.cpp:51-55`) → `activateIndex` → `toggleTag`. Add the override with the held-Confirm branch (`ENTER_DELETE_MODE_MS = 700`, `HighlightsActivity.cpp:20`), guarding the "New tag…" row as in Step 3.
+
+If you decide tag deletion should be touch-only instead, that is a legitimate choice — but say so explicitly in the plan and add it to "Deferred to on-device verification". Do not leave it undecided.
 
 - [ ] **Step 2: Guard `handleHomeGesture`**
 
@@ -264,9 +285,21 @@ v1 said "`UiListActivity` already provides `onRowLongPress` — follow the idiom
 
 `rowActionTrampoline` bounds-checks against `listCount()` (`UiListActivity.cpp:33`), which is `tags().size() + 1` — so `onRowLongPress(tagCount)` **is** delivered for the "New tag…" row. Guard with `if (index < 0 || index >= tagCount) return;`.
 
-- [ ] **Step 4: Confirm, stating the book-wide effect**
+- [ ] **Step 4: Confirm, stating the book-wide effect — and bail when saving is disabled**
 
-Use `OptionPopup`, as `HighlightsActivity::showDeleteConfirmation` does. The message must say deleting a tag **removes it from every highlight that carries it**, not just this one.
+**Gate the whole delete on `saveDisabled_` before showing the confirmation**, exactly as `showDeleteConfirmation` does (`HighlightsActivity.cpp:156-165`):
+
+```cpp
+  if (saveDisabled_) {
+    // The file may still hold the user's data (LoadResult::Failed); never let a
+    // destructive palette change through in that state.
+    ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
+    requestUpdate();
+    return;
+  }
+```
+
+Then use `OptionPopup`, as `showDeleteConfirmation` does. The message must say deleting a tag **removes it from every highlight that carries it**, not just this one.
 
 Add to `lib/I18n/translations/english.yaml`: **`STR_CONFIRM_DELETE_TAG`** — e.g. *"Delete this tag from every highlight in this book?"*. `gen_i18n.py` is a pre-build script that **exits 1** on a referenced-but-missing key (`gen_i18n.py:873-881`), so a missing string is a hard build failure, not a warning. The other 31 languages fall back to English automatically (`gen_i18n.py:217-222`) — English-only is sufficient.
 
@@ -281,14 +314,33 @@ The hazard is still real — the loop task erasing from `tags_` while the render
 ```cpp
   {
     RenderLock lock(*this);
-    highlightDoc.removeTag(index);
+    highlightDoc.removeTag(static_cast<uint16_t>(index));  // removeTag takes uint16_t; row index is int
     // selected_ is index-aligned with the palette; shift it to match.
-    for (size_t j = index; j + 1 < HighlightDoc::MAX_TAGS; ++j) selected_[j] = selected_[j + 1];
+    for (size_t j = static_cast<size_t>(index); j + 1 < HighlightDoc::MAX_TAGS; ++j) selected_[j] = selected_[j + 1];
     selected_[HighlightDoc::MAX_TAGS - 1] = false;
   }
   requestUpdate();
-  // SD write happens after the lock is released.
+
+  // SD write after the lock releases. HighlightFile::save is read-only on the
+  // doc, so this is safe outside the lock.
+  switch (HighlightFile::save(bookPath_, highlightDoc)) {
+    case HighlightFile::SaveResult::Ok:
+      break;
+    case HighlightFile::SaveResult::TooLarge:
+    case HighlightFile::SaveResult::WriteFailed:
+      // NOTE: unlike every other mutation in this feature, this one CANNOT be
+      // rolled back. removeTag erases the tag and rewrites every highlight's
+      // references (HighlightDoc.cpp:21-34); addTag only appends, and the set
+      // of highlights that carried the tag was not retained. So memory and disk
+      // diverge here and the next successful save commits the deletion. Tell
+      // the user rather than failing silently.
+      ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_SAVE_FAILED));
+      requestUpdate();
+      break;
+  }
 ```
+
+Enumerate both failure cases rather than writing `default:` — the house style does (`HighlightsActivity.cpp:196-214`), and it keeps `-Wswitch` useful if a third result is ever added.
 
 **Shift `selected_`, never clear it.** Clearing looks tidy and is a data-loss path: `initialSelection_` is consumed once in `onEnter` (`TagPickerActivity.cpp:25-28`) and not retained, so in Task 4's retag flow a clear is unrecoverable — `commitAndFinish` would return an empty list and `setTags(docIndex, {})` would strip every tag off the highlight the user was editing.
 
@@ -317,9 +369,24 @@ Zeroing the vacated top slot is **not** optional: `toggleTag` counts checks acro
   bool choosingAction_ = false;
 ```
 
+**Gate "Tags…" on `saveDisabled_`.** Retagging writes the document, so on a book whose file failed to load it must not be offered — the resident doc was built from scratch this session and saving would destroy the user's on-disk highlights. Either omit the option when `saveDisabled_` is set, or have its callback show `STR_HIGHLIGHTS_LOAD_FAILED` and return, mirroring `showDeleteConfirmation` (`:156-165`). The existing Delete option is already gated that way; do not leave the new one open.
+
+**Extend the existing popup guards to both popups.** Three sites currently guard on `confirmPopup_.isActive()` — `activateIndex` (`:133`), `onRowLongPress` (`:149`), `showDeleteConfirmation` (`:157`). Each becomes `if (confirmPopup_.isActive() || actionChooser_.isActive()) return;`. Unreachable today (an active popup makes `handleCustomInput` return true before `loop()` routes touch), but they are defence in depth and half-updated guards are how the next change breaks.
+
 - [ ] **Step 2: Route both popups explicitly**
 
-`handleCustomInput()` must, in this order: chooser `handleInput` → chooser dismiss-recovery → confirm `handleInput` → confirm dismiss-recovery. `render()` must `processRender` both.
+`handleCustomInput()` must, in this order: chooser `handleInput` → chooser dismiss-recovery → confirm `handleInput` → confirm dismiss-recovery.
+
+`render()` must contain **two guarded early-returns in sequence, chooser first** — not two bare calls:
+
+```cpp
+  if (actionChooser_.processRender(renderer, mappedInput)) return;
+  if (confirmPopup_.processRender(renderer, mappedInput)) return;
+  drawFooter();
+  renderer.displayBuffer();
+```
+
+`processRender` is not a passive draw: it paints the dialog *and* calls `renderer.displayBuffer()`, returning true (`OptionPopup.h:134-141`). Calling both and falling through would paint the footer over the dialog and trigger a second e-ink refresh.
 
 Clear `choosingAction_` **before** calling `showDeleteConfirmation`, mirroring how the existing callback clears `confirmingDelete_` before `deleteHighlight` (`HighlightsActivity.cpp:171`) so the fall-through recovery does not misfire.
 
@@ -330,7 +397,11 @@ Add to `english.yaml`: **`STR_HIGHLIGHT_ACTIONS`** (chooser title) and **`STR_ED
 - [ ] **Step 3: Launch the picker with the entry's current tags**
 
 ```cpp
-  app.clearTapFlash();  // every activity push in this codebase does this first
+  // clearTapFlash is what the row-tap pushes do (HighlightsActivity.cpp:144,151)
+  // because a row flash is what lingers. This push comes from a popup button, so
+  // it is optional here — PassageSelectActivity::startTagFlow pushes the same
+  // activity from a popup callback without it (PassageSelectActivity.cpp:199).
+  app.clearTapFlash();
   const std::vector<uint16_t> initialSelection = highlightDoc_.highlights()[docIndex].tagIndices;
   startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_,
                                                              saveDisabled_, initialSelection),
@@ -352,8 +423,32 @@ What genuinely goes stale is:
 So the handler must:
 
 1. Bounds-check `docIndex` against `highlights().size()` and treat an invalid index as a no-op.
-2. On the **committed** path (`!result.isCancelled`), `std::get<TagSelectionResult>`, then `setTags(docIndex, ...)`, then `HighlightFile::save`.
-3. **On both paths, committed and cancelled**, re-validate `filterTagIndex_` against `tags().size()` — reset it to "All" if out of range, since there is no way to recover which tag the user meant once indices shift — then `rebuildVisibleIndices()` and `rebuildRowItems()`, then `requestUpdate()`.
+2. On the **committed** path (`!result.isCancelled`), `std::get<TagSelectionResult>`, then `setTags(docIndex, ...)`, then — **only when `!saveDisabled_`** — `HighlightFile::save`. Without that gate this path writes over a book whose file failed to load, defeating the guard `showDeleteConfirmation` and `PassageSelectActivity::onEnter` both install.
+3. **On both paths, committed and cancelled**, reconcile the palette-dependent state:
+
+```cpp
+  // Captured immediately before startActivityForResult:
+  //   const size_t tagsBefore = highlightDoc_.tags().size();
+  if (highlightDoc_.tags().size() != tagsBefore) {
+    // A range check is NOT enough: deleting a tag BELOW filterTagIndex_ leaves
+    // the index in range but silently pointing at a different tag. Any size
+    // change means the numbering moved, and there is no way to recover which
+    // tag the user meant — so reset to "All".
+    filterTagIndex_ = std::nullopt;
+  }
+  {
+    RenderLock lock(*this);
+    rebuildVisibleIndices();
+    rebuildRowItems();
+  }
+  moveSelectionTo(std::clamp(activeNav().selected, 0, listCount() - 1));
+```
+
+Three things there matter:
+
+- **Size-compare, not range-check.** v2 prescribed re-validating against `tags().size()`, which only catches the case where the filter tag was at or above the deletion *and* was last. It misses the common case the same paragraph diagnoses.
+- **Hold `RenderLock` across the rebuilds.** They `clear()` and refill the `rowItems_` vector that `buildScreen` hands the render task as `rowItems_.data()` (`:289`). The result handler runs with the render lock explicitly released (`ActivityManager.cpp:130-131`), so nothing else serialises this. Task 3 Step 5 reasons about exactly this race; apply the same conclusion here.
+- **Clamp the selection.** The rebuild can shrink `visibleIndices_` (filter reset, or the filtered tag deleted). `deleteHighlight` already ends this way (`:217`), and `moveSelectionTo` issues the `requestUpdate()` for you.
 
 Point 3 matters because the picker persists palette changes itself (Task 2): a user who deletes a tag and then backs out has already changed the document on disk. v1's `isCancelled` early-return would have skipped every rebuild.
 
@@ -410,4 +505,7 @@ Joins the UI plan's Task 8 checklist (`docs/superpowers/plans/2026-08-19-highlig
 | Clearing `selected_` wipes the edited highlight's tags | High | Task 3 Step 5 shifts, never clears |
 | `filterTagIndex_` / `visibleIndices_` / `rowSubtitles_` stale after a palette change | High | Task 4 Step 4 rebuilds on both paths |
 | Missing i18n key fails the build | Medium | Tasks 3 and 4 name the three new ids |
-| Loop task erases `tags_` mid-render | Medium | Task 3 Step 5 wraps the mutation in a `RenderLock` |
+| Loop task erases `tags_` mid-render | Medium | Task 3 Step 5 wraps the mutation in a `RenderLock`; Task 4 Step 4 does the same for the rebuilds |
+| Retag or tag-delete writes over a `saveDisabled_` book | High | Gated in Task 3 Step 4 and Task 4 Steps 1 and 4 |
+| A failed tag-delete save cannot be rolled back | Medium | Unavoidable — `removeTag` is destructive and the affected highlights are not retained. Task 3 Step 5 surfaces the failure to the user and says so in a comment |
+| Tag delete unreachable on a non-touch board | Medium | Task 3 Step 1 item 5 adds the held-Confirm path, or the plan declares it touch-only |
