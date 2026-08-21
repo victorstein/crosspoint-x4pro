@@ -4,40 +4,38 @@
 
 **Goal:** Make the tag palette two-way — a tag can be deleted, and a saved highlight's tags can be changed.
 
-**Architecture:** One new pure `HighlightDoc` method (host-tested), plus two UI affordances built from existing components. `TagPickerActivity` gains the ability to persist palette changes itself, which also closes an existing durability hole.
+**Architecture:** One new pure `HighlightDoc` method (host-tested), plus two UI affordances. `TagPickerActivity` gains the ability to persist palette changes itself, which also closes an existing durability hole.
 
 **Tech Stack:** C++20, PlatformIO, host CMake + GoogleTest.
 
-**Depends on:** the foundations, anchoring, data-layer and UI plans — all complete. Baseline **216 host tests** at `7672061a`.
+**Depends on:** foundations, anchoring, data-layer and UI plans — all complete. Baseline **216 host tests** at `7672061a`.
 
 **Delivery:** fork-only.
+
+> **v2 — revised after adversarial review.** v1 contained four instructions that would have shipped broken behaviour (a rollback that deletes a pre-existing tag, a long-press that is dead on arrival, nested popups that free the running callback, and a `selected_` reset that wipes the user's tags), two guaranteed build/verification failures, and three misdiagnoses that would have put defensive code in the wrong place while leaving the real stale state untouched. All corrected below.
 
 ---
 
 ## Why this exists
 
-The tag palette is currently a one-way door, and the consequences are worse than a missing screen:
+The tag palette is a one-way door:
 
-- **`HighlightDoc::removeTag` is called only by tests.** It is implemented and well covered — six tests, including the index renumbering that keeps every highlight resolving to the same tag *name* — but no UI reaches it.
-- **A typo in "New tag…" is permanent.** The palette is book-wide and `TagPickerActivity`'s class comment states the add is deliberately not rolled back on cancel.
-- **`MAX_TAGS` is 32.** Once full, `addTag` returns `nullopt` forever and the user sees "palette full" with no on-device recovery.
-- **A highlight's tags are set once, at creation.** `TagPickerActivity::initialSelection` exists and pre-checks rows (`TagPickerActivity.cpp:26`) but **no caller passes it** — it was written for a re-tag flow that does not exist. Retagging today means deleting the highlight and re-selecting the passage.
+- **`HighlightDoc::removeTag` is called only by tests** (`test/highlight_doc/HighlightDocTest.cpp:198-271`, six tests including index renumbering). No UI reaches it.
+- **A typo in "New tag…" is permanent**, and the palette is book-wide.
+- **`MAX_TAGS` is 32.** Once full, `addTag` returns `nullopt` forever.
+- **A highlight's tags are set once, at creation.** `TagPickerActivity::initialSelection` pre-checks rows (`TagPickerActivity.cpp:26`) but no caller passes it.
 
-That undercuts the browser's tag filter as much as having no tags at all.
+## An existing durability hole this closes
 
-## An existing durability hole this plan closes
+`TagPickerActivity` takes only `HighlightDoc&` and cannot save. A new tag reaches disk only if the caller later saves. Create a tag, cancel the highlight, and it vanishes on reload.
 
-`TagPickerActivity` today takes only `HighlightDoc&`. It calls `addTag`, which mutates the in-memory palette — but the activity cannot save. The new tag reaches disk only if the *caller* happens to save afterwards.
+**Decision: the picker persists palette mutations itself.** It gains `bookPath` and `saveDisabled`, matching `HighlightsActivity`'s constructor shape.
 
-In the creation flow that works by accident: `PassageSelectActivity::finalizeSelection` saves the whole document. But if the user creates a tag and then cancels the highlight, the tag exists in RAM and vanishes on reload. Worse, after this plan adds a *deletion* path, a delete that is never saved would silently come back.
+> Note: `saveDisabled` is currently dead on the only existing call site — `PassageSelectActivity::onEnter` bails before the picker is reachable when it is true (`PassageSelectActivity.cpp:26-30`). It becomes live via Task 4's launch from `HighlightsActivity`. Wire it anyway.
 
-**Decision: `TagPickerActivity` persists palette mutations itself, immediately.** It gains `bookPath` and `saveDisabled`, matching `HighlightsActivity`'s constructor shape. A palette change is book-wide state and should not depend on what the caller does next.
+## Out of scope
 
-## What this plan does not do
-
-- **No cross-book tag management.** Tags are per-book by design.
-- **No tag renaming.** `removeTag` + `addTag` is the available primitive; renaming would need a new method and its own renumbering story. If you want it, it is a separate plan.
-- **No merge on duplicate names.** `addTag` already dedupes by name and returns the existing index.
+No cross-book tags, no tag renaming (`removeTag` + `addTag` is the available primitive), no merge on duplicate names (`addTag` already dedupes by name).
 
 ---
 
@@ -45,18 +43,18 @@ In the creation flow that works by accident: `PassageSelectActivity::finalizeSel
 
 | File | Responsibility |
 | --- | --- |
-| `lib/Epub/Epub/HighlightDoc.h` / `.cpp` (modify) | `setTags` — change an existing entry's tags, validated |
-| `test/highlight_doc/HighlightDocTest.cpp` (modify) | Host tests for `setTags` |
-| `src/activities/reader/TagPickerActivity.{h,cpp}` (modify) | Persist palette changes; long-press a tag to delete it |
+| `lib/Epub/Epub/HighlightDoc.h` / `.cpp` (modify) | `setTags` |
+| `test/highlight_doc/HighlightDocTest.cpp` (modify) | 8 host tests |
+| `src/activities/reader/TagPickerActivity.{h,cpp}` (modify) | Persist palette changes; long-press to delete a tag |
 | `src/activities/reader/HighlightsActivity.{h,cpp}` (modify) | Long-press offers Tags / Delete / Cancel |
-| `src/activities/reader/PassageSelectActivity.cpp` (modify) | Pass the new `TagPickerActivity` arguments |
-| `lib/I18n/translations/english.yaml` (modify) | New strings |
+| `src/activities/reader/PassageSelectActivity.cpp` (modify) | Pass the new constructor arguments |
+| `lib/I18n/translations/english.yaml` (modify) | 3 new strings — see Tasks 3 and 4 |
 
 ---
 
 ### Task 1: `HighlightDoc::setTags`
 
-`highlights()` returns a `const&`, so there is no way to change an entry's tags today. This is the only new pure logic in the plan, and the only part that is host-testable.
+`highlights()` returns a `const&`, so an entry's tags cannot be changed. This is the only new pure logic, and the only host-testable part.
 
 **Files:**
 - Modify: `lib/Epub/Epub/HighlightDoc.h`, `lib/Epub/Epub/HighlightDoc.cpp`
@@ -84,11 +82,17 @@ TEST(HighlightDocSetTags, ClearsTagsWithAnEmptyList) {
   EXPECT_TRUE(doc.highlights()[0].tagIndices.empty());
 }
 
-TEST(HighlightDocSetTags, RejectsAnOutOfRangeEntryIndex) {
+TEST(HighlightDocSetTags, RejectsAnOutOfRangeEntryIndexWithoutTouchingAnything) {
   HighlightDoc doc;
-  doc.addHighlight(makeEntry(0, 0, 10));
+  ASSERT_TRUE(doc.addTag("alpha").has_value());
+  doc.addHighlight(makeEntry(0, 0, 10, {0}));
+
   EXPECT_FALSE(doc.setTags(7, {}));
   EXPECT_FALSE(doc.setTags(1, {})) << "one past the end is out of range";
+  // The contract says the entry is untouched on rejection — assert it, or an
+  // implementation that clobbers before range-checking passes.
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
 }
 
 TEST(HighlightDocSetTags, DropsTagIndicesOutsideThePalette) {
@@ -130,6 +134,8 @@ TEST(HighlightDocSetTags, TouchesOnlyTheNamedEntry) {
   doc.addHighlight(makeEntry(0, 20, 30, {0}));
 
   ASSERT_TRUE(doc.setTags(1, {1}));
+  ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
+  ASSERT_EQ(doc.highlights()[1].tagIndices.size(), 1u);
   EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha") << "the first entry must be untouched";
   EXPECT_EQ(doc.tags()[doc.highlights()[1].tagIndices[0]], "beta");
 }
@@ -143,13 +149,16 @@ TEST(HighlightDocSetTags, SurvivesARoundTrip) {
 
   HighlightDoc parsed;
   ASSERT_TRUE(roundTrip(doc, parsed));
+  ASSERT_EQ(parsed.highlights()[0].tagIndices.size(), 1u);
   EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "beta");
 }
 ```
 
-`makeEntry` and `roundTrip` are the existing helpers in that file.
+Every `[0]` dereference is now preceded by an `ASSERT_EQ` on size — against a regression these must fail red, not over-read the heap.
 
-- [ ] **Step 2: Run and confirm failure** (`setTags` is undeclared)
+`makeEntry(uint16_t, uint32_t, uint32_t, std::vector<uint16_t> = {})` is at `HighlightDocTest.cpp:9-17`; `roundTrip(const HighlightDoc&, HighlightDoc&)` at `:20-28`. Both signatures verified.
+
+- [ ] **Step 2: Run and confirm failure** (`setTags` undeclared)
 
 - [ ] **Step 3: Declare it**
 
@@ -157,17 +166,20 @@ TEST(HighlightDocSetTags, SurvivesARoundTrip) {
   // Replaces entry `index`'s tags. Returns false when `index` is out of range;
   // the entry is untouched in that case.
   //
-  // Applies the same validation as the parse path: references outside the
-  // palette are dropped, repeats are collapsed, and the result is capped at
-  // MAX_TAGS_PER_HIGHLIGHT. A caller cannot produce an entry that setTags would
-  // reject, but a caller CAN produce one whose tags a later removeTag would
-  // renumber — so this is validation, not trust.
+  // Drops references outside the palette, collapses repeats, and caps at
+  // MAX_TAGS_PER_HIGHLIGHT. Note this is deliberately STRICTER than the parse
+  // path: fromJson drops out-of-range refs and caps, but does NOT dedupe
+  // (HighlightDoc.cpp:111-117), so {"t":[0,0,0]} parses to three copies. A UI
+  // caller can produce repeats by toggling; JSON on disk comes from toJson,
+  // which never emits them.
   bool setTags(size_t index, std::vector<uint16_t> tagIndices);
 ```
 
-- [ ] **Step 4: Implement, run passing**
+- [ ] **Step 4: Implement directly — do NOT try to share with `fromJson`**
 
-Share the validation with `fromJson`'s existing tag-reference handling rather than writing a second copy — a divergence between the two is exactly the class of bug that produced the earlier `classifyDocRead` finding.
+v1 said to share the validation. That is wrong twice over: `fromJson` does **not** dedupe, so sharing would fail this task's own `DeduplicatesRepeatedIndices` test; and its loop is interleaved with JSON traversal (`JsonVariantConst` iteration, the `ref | -1` default idiom, and validation against a *local* `tags` vector that is only committed at `HighlightDoc.cpp:124-125`, not against `tags_`). Extracting a shared helper means parameterising over both the source range and the palette, to share four lines.
+
+Write the ~6-line loop against `tags_` directly.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -186,27 +198,46 @@ Expected **224** host tests (216 + 8).
 
 - [ ] **Step 1: Extend the constructor**
 
-Match `HighlightsActivity`'s shape:
-
 ```cpp
   explicit TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
                              std::string bookPath, bool saveDisabled,
                              std::vector<uint16_t> initialSelection = {});
 ```
 
-- [ ] **Step 2: Save immediately after `addTag` succeeds**
+- [ ] **Step 2: Save after `addTag` — but ONLY when the palette actually grew**
 
-The palette is book-wide state; its durability must not depend on whether the caller later saves the highlight. On `SaveResult::TooLarge` or `WriteFailed`, report via `ReaderUtils::showMessage` and **remove the just-added tag** so memory and disk agree — mirroring `PassageSelectActivity`'s rollback on a failed save.
+**This is the step v1 got dangerously wrong.** `addTag` dedupes by name and returns the *existing* index without adding anything (`HighlightDoc.cpp:11-18`) — the activity already relies on this (`TagPickerActivity.cpp:124-127`). So a blanket "remove the just-added tag on save failure" would call `removeTag` on a **pre-existing** tag, erasing it from every highlight in the book because the user retyped a name and the SD write failed.
 
-Respect `saveDisabled`: if `HighlightFile::load` previously returned `Failed`, the palette must not be written either.
+```cpp
+  const size_t before = highlightDoc.tags().size();
+  const auto tagIndex = highlightDoc.addTag(name);
+  if (!tagIndex) { /* existing failure messages: full / empty / too long */ }
 
-- [ ] **Step 3: Update the class comment**
+  const bool grew = highlightDoc.tags().size() > before;
+  if (grew && !saveDisabled_) {
+    switch (HighlightFile::save(bookPath_, highlightDoc)) {
+      case HighlightFile::SaveResult::Ok:
+        break;
+      default:
+        // Roll back ONLY a genuinely new tag. A dedupe hit added nothing, so
+        // there is nothing to undo — and removeTag would strip a tag the user
+        // already had off every highlight in the book.
+        highlightDoc.removeTag(*tagIndex);
+        ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_SAVE_FAILED));
+        return;
+    }
+  }
+```
 
-The header currently states the add is *"NOT rolled back on cancel"*. After this task it is persisted immediately and rolled back on save failure. Rewrite it to say what is now true.
+When `grew` is false there is no palette change to persist — **skip the save entirely.** `selected_[*tagIndex]` must be set on both paths.
+
+- [ ] **Step 3: Rewrite the class comment**
+
+`TagPickerActivity.h` currently says the add is *"NOT rolled back on cancel — the palette is book-wide state."* That is now half-true: it is persisted immediately and rolled back only on save failure. State what is true.
 
 - [ ] **Step 4: Update the one construction site**
 
-`PassageSelectActivity.cpp:200` — pass `bookPath` and `saveDisabled`, both of which that activity already holds.
+`PassageSelectActivity.cpp:200`. Both `bookPath` and `saveDisabled` are `const` members of that class (`PassageSelectActivity.h:90,92`) — verified available.
 
 - [ ] **Step 5: Build both boards and commit**
 
@@ -214,61 +245,119 @@ The header currently states the add is *"NOT rolled back on cancel"*. After this
 
 ### Task 3: Delete a tag from the palette
 
-**Files:** `src/activities/reader/TagPickerActivity.{h,cpp}`
+**Files:** `src/activities/reader/TagPickerActivity.{h,cpp}`, `lib/I18n/translations/english.yaml`
 
-- [ ] **Step 1: Long-press a tag row to delete it**
+v1 said "`UiListActivity` already provides `onRowLongPress` — follow the idiom." That is true and insufficient: the hook is gated behind **two independent opt-ins** that `TagPickerActivity` does not set, and the popup it opens would never be drawn. Following v1 literally produces a gesture that does nothing, on a build that passes both boards.
 
-`UiListActivity` already provides `onRowLongPress(int index)`, and `HighlightsActivity` uses exactly this idiom for deleting a highlight — follow it rather than inventing a gesture.
+- [ ] **Step 1: Enable long-press — all four changes**
 
-Guard: the "New tag…" row is not a tag and must not be deletable. Check the index maps to a real palette entry.
+1. **Constructor flag.** `TagPickerActivity.cpp:18` passes `UiListActivity("TagPicker", renderer, mappedInput)`; `wantsTouchLongPress` defaults to `false` (`UiListActivity.h:29`). Pass `/*wantsTouchLongPress=*/true`, as `HighlightsActivity.cpp:25` does.
+2. **Input mask.** `TagPickerActivity.cpp:75` sets `props.inputMask = fui::InputTouch;`. It must be `fui::InputTouch | fui::InputLongPress` (`HighlightsActivity.cpp:293`).
+3. **Popup member + routing.** Add `OptionPopup confirmPopup_;` and `bool confirmingDelete_ = false;`, plus a `handleCustomInput()` override — the base returns `false` (`UiListActivity.h:56`).
+4. **Render seam.** `UiListActivity::render()` (`UiListActivity.cpp:151-167`) has no seam to interleave a popup. `HighlightsActivity` had to duplicate the whole body and says so (`HighlightsActivity.cpp:299-303`). Add the same `render(RenderLock&&)` override, popup drawn between the app render and the footer.
 
-- [ ] **Step 2: Confirm before deleting**
+- [ ] **Step 2: Guard `handleHomeGesture`**
 
-Use `OptionPopup`, as `HighlightsActivity::showDeleteConfirmation` does. The message must say what the user is actually about to do: deleting a tag **removes it from every highlight that carries it**, across the whole book — not just this one.
+`TagPickerActivity.cpp:161-164` unconditionally commits and finishes. With a dialog open that would commit the selection out from under it. Add `if (confirmPopup_.isActive()) return true;` first.
 
-Handle the dismiss-without-firing path. `OptionPopup` dismisses on a tap outside the dialog without invoking the callback; `PassageSelectActivity` shipped a bug where that left the activity inert. Mirror `HighlightsActivity::handleCustomInput`'s recovery.
+- [ ] **Step 3: Long-press a tag row, with the "New tag…" row excluded**
 
-- [ ] **Step 3: Delete, save, rebuild**
+`rowActionTrampoline` bounds-checks against `listCount()` (`UiListActivity.cpp:33`), which is `tags().size() + 1` — so `onRowLongPress(tagCount)` **is** delivered for the "New tag…" row. Guard with `if (index < 0 || index >= tagCount) return;`.
 
-Call `HighlightDoc::removeTag` — already covered by six host tests including renumbering — then `HighlightFile::save`.
+- [ ] **Step 4: Confirm, stating the book-wide effect**
 
-**Rebuild the row cache immediately after the mutation and before the SD write.** `rowItems_` labels point into `tags()` strings; erasing shifts every later entry and the render task runs concurrently. This is the use-after-free that had to be fixed in `HighlightsActivity::deleteHighlight`; do not reintroduce it.
+Use `OptionPopup`, as `HighlightsActivity::showDeleteConfirmation` does. The message must say deleting a tag **removes it from every highlight that carries it**, not just this one.
 
-Also clear or re-validate `selected_`, the `bool[MAX_TAGS]` check state — it is index-aligned with the palette, so a deletion shifts what every checked box means.
+Add to `lib/I18n/translations/english.yaml`: **`STR_CONFIRM_DELETE_TAG`** — e.g. *"Delete this tag from every highlight in this book?"*. `gen_i18n.py` is a pre-build script that **exits 1** on a referenced-but-missing key (`gen_i18n.py:873-881`), so a missing string is a hard build failure, not a warning. The other 31 languages fall back to English automatically (`gen_i18n.py:217-222`) — English-only is sufficient.
 
-- [ ] **Step 4: Build both boards and commit**
+Handle dismiss-without-firing (a tap outside the dialog invokes no callback). Mirror `HighlightsActivity::handleCustomInput`'s recovery, which clears its flag on the frame *after* the dismissal — `OptionPopup::handleInput` returns `true` on the dismissing call itself.
+
+- [ ] **Step 5: Delete under a `RenderLock`, then save**
+
+v1 said to "rebuild the row cache before the SD write." **That recipe does not transfer.** `TagPickerActivity` has no rebuild method: `rowItems_` is populated inside `buildScreen`, which runs on the **render task** via the base trampoline (`UiListActivity.cpp:27-29`) and is deliberately never cached across visits (`TagPickerActivity.h:59-64`).
+
+The hazard is still real — the loop task erasing from `tags_` while the render task sits between `item.label = tags[i].c_str()` (`TagPickerActivity.cpp:59`) and `screen.list(props)` (`:77`). The right tool is the one `UiListActivity::moveSelectionTo` uses for the same loop-vs-render race (`UiListActivity.cpp:71-79`):
+
+```cpp
+  {
+    RenderLock lock(*this);
+    highlightDoc.removeTag(index);
+    // selected_ is index-aligned with the palette; shift it to match.
+    for (size_t j = index; j + 1 < HighlightDoc::MAX_TAGS; ++j) selected_[j] = selected_[j + 1];
+    selected_[HighlightDoc::MAX_TAGS - 1] = false;
+  }
+  requestUpdate();
+  // SD write happens after the lock is released.
+```
+
+**Shift `selected_`, never clear it.** Clearing looks tidy and is a data-loss path: `initialSelection_` is consumed once in `onEnter` (`TagPickerActivity.cpp:25-28`) and not retained, so in Task 4's retag flow a clear is unrecoverable — `commitAndFinish` would return an empty list and `setTags(docIndex, {})` would strip every tag off the highlight the user was editing.
+
+Zeroing the vacated top slot is **not** optional: `toggleTag` counts checks across the whole fixed array to enforce the per-highlight cap (`TagPickerActivity.cpp:96`), so a stale trailing `true` would make the picker refuse an 8th tag after seven.
+
+- [ ] **Step 6: Fix the now-false member comment**
+
+`TagPickerActivity.h:54-57` says the palette *"can only grow … never shrink"* — that comment is the entire justification for the fixed-capacity array and the index alignment. Rewrite it for the delete path.
+
+- [ ] **Step 7: Build both boards and commit**
 
 ---
 
 ### Task 4: Edit a saved highlight's tags
 
-**Files:** `src/activities/reader/HighlightsActivity.{h,cpp}`
+**Files:** `src/activities/reader/HighlightsActivity.{h,cpp}`, `lib/I18n/translations/english.yaml`
 
-- [ ] **Step 1: Long-press offers a choice**
+- [ ] **Step 1: A second popup, not a reused one**
 
-`onRowLongPress` currently goes straight to `showDeleteConfirmation` (`HighlightsActivity.cpp:150-154`). Replace that with an `OptionPopup` offering **Tags… / Delete / Cancel**. Delete then shows its existing confirmation — do not remove that second step; it is the only destructive action in the feature.
+`onRowLongPress` (`HighlightsActivity.cpp:148-154`) goes straight to `showDeleteConfirmation`. It must instead open a chooser offering **Tags… / Delete / Cancel**.
 
-Same dismiss-without-firing recovery as everywhere else.
-
-- [ ] **Step 2: Launch the picker with the entry's current tags**
+**Do not reuse `confirmPopup_`.** `OptionPopup::show()` reassigns `onSelectCallback` (`OptionPopup.h:42-53`), and the callback is invoked as that same member (`:80-84`) — calling `show()` from inside it destroys the executing closure. Add a second member:
 
 ```cpp
-startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_,
-                                                           saveDisabled_, entry.tagIndices),
-                       /* result handler */);
+  OptionPopup actionChooser_;
+  bool choosingAction_ = false;
 ```
 
-`initialSelection` already pre-checks those rows (`TagPickerActivity.cpp:26`) — this is the flow that parameter was written for.
+- [ ] **Step 2: Route both popups explicitly**
 
-- [ ] **Step 3: Write the result back**
+`handleCustomInput()` must, in this order: chooser `handleInput` → chooser dismiss-recovery → confirm `handleInput` → confirm dismiss-recovery. `render()` must `processRender` both.
 
-In the handler, guard on `!result.isCancelled` before `std::get<TagSelectionResult>` — the build is `-fno-exceptions`, so a mismatch calls `std::terminate`. Then `setTags(docIndex, ...)` and `HighlightFile::save`.
+Clear `choosingAction_` **before** calling `showDeleteConfirmation`, mirroring how the existing callback clears `confirmingDelete_` before `deleteHighlight` (`HighlightsActivity.cpp:171`) so the fall-through recovery does not misfire.
 
-**Do not hold a `HighlightEntry*` or a doc index across the `startActivityForResult` push.** The picker can mutate the palette — and with Task 3, can *delete* a tag, which renumbers references and could change what the entry's own tags mean. Re-resolve the entry after the picker returns, and treat a now-invalid index as a no-op rather than indexing blindly.
+`OptionPopup` draws over the current screen without clearing (`OptionPopup.h:15`), and the 3-option chooser is taller than the 2-option confirm — so its remnants would frame the confirm dialog. Force a clean repaint between them with `requestUpdateAndWait()`, as `PassageSelectActivity::showActionChooser` does for the same reason (`PassageSelectActivity.cpp:174-180`).
 
-- [ ] **Step 4: Rebuild and repaint**
+Add to `english.yaml`: **`STR_HIGHLIGHT_ACTIONS`** (chooser title) and **`STR_EDIT_TAGS`** (the "Tags…" option label).
 
-After `setTags`, rebuild the row cache before the save (same reason as Task 3) and `requestUpdate()` so the change is visible without leaving the screen.
+- [ ] **Step 3: Launch the picker with the entry's current tags**
+
+```cpp
+  app.clearTapFlash();  // every activity push in this codebase does this first
+  const std::vector<uint16_t> initialSelection = highlightDoc_.highlights()[docIndex].tagIndices;
+  startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_,
+                                                             saveDisabled_, initialSelection),
+                         /* handler below */);
+```
+
+Naming the local `initialSelection` also makes Task 5's grep meaningful.
+
+- [ ] **Step 4: The result handler — and the stale state v1 named wrongly**
+
+v1 warned that a doc index could be invalidated across the push because "the picker can delete a tag, which renumbers references." **That is false.** `removeTag` erases from `tags_` and rewrites each entry's `tagIndices`; it never resizes or reorders `highlights_` (`HighlightDoc.cpp:21-34`). `TagPickerActivity` calls neither `addHighlight` nor `removeHighlight`. A `size_t` doc index is **stable** across the push — which is exactly what `pendingDeleteIndex_` already relies on (`HighlightsActivity.h:122-125`).
+
+What genuinely goes stale is:
+
+- **`filterTagIndex_`** (`HighlightsActivity.h:107`) — a raw index into `tags()`. Delete a tag below it and the filter silently means a different tag; delete enough and `computeFilterSubtitle` reports "All" (`:58`) while `rebuildVisibleIndices` still filters on the dead index (`:47-50`) — "Filter by tag: All" over an empty list.
+- **`visibleIndices_`** — computed against the pre-deletion numbering.
+- **`rowSubtitles_`** — rendered tag names (`tagsSubtitleFor`, `:62-72`).
+
+So the handler must:
+
+1. Bounds-check `docIndex` against `highlights().size()` and treat an invalid index as a no-op.
+2. On the **committed** path (`!result.isCancelled`), `std::get<TagSelectionResult>`, then `setTags(docIndex, ...)`, then `HighlightFile::save`.
+3. **On both paths, committed and cancelled**, re-validate `filterTagIndex_` against `tags().size()` — reset it to "All" if out of range, since there is no way to recover which tag the user meant once indices shift — then `rebuildVisibleIndices()` and `rebuildRowItems()`, then `requestUpdate()`.
+
+Point 3 matters because the picker persists palette changes itself (Task 2): a user who deletes a tag and then backs out has already changed the document on disk. v1's `isCancelled` early-return would have skipped every rebuild.
+
+Guard `std::get` on `!result.isCancelled` — the build is `-fno-exceptions` (`platformio.ini:62`), so a mismatched alternative aborts with no recovery.
 
 - [ ] **Step 5: Build both boards and commit**
 
@@ -284,38 +373,41 @@ pio run -e x4pro
 pio run -e default
 ```
 
-Expected **224** host tests; both firmware targets SUCCESS. **Run the two `pio` invocations sequentially** — they race on a shared `idf_component.yml` during the Arduino-core rebuild.
+Expected **224** host tests; both SUCCESS. **Run the two `pio` invocations sequentially** — they race on a shared `idf_component.yml` during the Arduino-core rebuild.
 
-- [ ] **Step 2: Confirm nothing is dead any more**
+- [ ] **Step 2: Confirm both orphans are connected**
 
 ```bash
-grep -rn 'removeTag' src | grep -v 'HighlightDoc'
-grep -rn 'initialSelection' src/activities/reader/HighlightsActivity.cpp
+grep -rn 'removeTag' src
+grep -n 'TagPickerActivity' src/activities/reader/HighlightsActivity.cpp
 ```
 
-Both must now have hits. `removeTag` and `TagPickerActivity::initialSelection` were the two orphans this plan exists to connect.
+Both must have hits. v1's second grep searched for the token `initialSelection` in `HighlightsActivity.cpp`, which a correct positional call never contains — it would have failed against correct code.
 
-- [ ] **Step 3: Trace the flows in prose and record them**
+- [ ] **Step 3: Trace three flows in prose and record them**
 
-Two paths, written out: create-a-tag-then-cancel-the-highlight (does the tag persist?), and delete-a-tag-that-two-highlights-share (do both lose it, and do their other tags still resolve to the same names?).
+1. Create a tag, then cancel the highlight — does the tag persist? (It should: the picker saves it.)
+2. Delete a tag two highlights share — do both lose it, and do their *other* tags still resolve to the same names?
+3. Delete a tag while a filter on a *later* tag is active — what does the filter show afterwards?
 
 ---
 
 ## Deferred to on-device verification
 
-These join the existing Task 8 checklist in the UI plan; none can be judged from a build:
+Joins the UI plan's Task 8 checklist (`docs/superpowers/plans/2026-08-19-highlights-ui.md:458`):
 
 - Long-press discoverability now that it opens a chooser rather than acting directly.
-- Whether the tag-deletion warning reads clearly enough that nobody deletes a tag from 40 highlights by accident.
-- Whether editing tags from the browser feels like it belongs there, or wants to be reachable from the highlight itself.
+- Whether the tag-deletion warning reads clearly enough that nobody strips a tag off 40 highlights by accident.
+- Whether editing tags from the browser feels like it belongs there.
 
 ## Risks
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| A stale doc index across the picker push | High | Task 4 Step 3 re-resolves after return; a deletion can renumber |
-| Row labels aliasing erased strings | High | Rebuild before the SD write, in both Task 3 and Task 4 |
-| `selected_` misaligned after a tag deletion | Medium | Task 3 Step 3 clears or re-validates it |
-| Palette save failure leaves memory ≠ disk | Medium | Roll back the add, mirroring `PassageSelectActivity` |
-| Popup dismissed without firing leaves an inert screen | Medium | Mirror `HighlightsActivity::handleCustomInput` in every new popup |
-| Deleting a tag surprises the user | Medium | Confirmation states the book-wide effect explicitly |
+| Rollback deletes a pre-existing tag on a dedupe hit | High | Task 2 Step 2 rolls back only when the palette grew |
+| Long-press silently dead (two unset opt-ins) | High | Task 3 Step 1 enumerates all four changes |
+| Nested popups free the running callback | High | Task 4 Step 1 adds a second member |
+| Clearing `selected_` wipes the edited highlight's tags | High | Task 3 Step 5 shifts, never clears |
+| `filterTagIndex_` / `visibleIndices_` / `rowSubtitles_` stale after a palette change | High | Task 4 Step 4 rebuilds on both paths |
+| Missing i18n key fails the build | Medium | Tasks 3 and 4 name the three new ids |
+| Loop task erases `tags_` mid-render | Medium | Task 3 Step 5 wraps the mutation in a `RenderLock` |
