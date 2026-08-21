@@ -227,13 +227,13 @@ void HighlightsActivity::editTags(const size_t docIndex) {
   startActivityForResult(
       std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_,
                                           initialSelection),
-      [this, docIndex, initialSelection, tagsBefore](const ActivityResult& result) {
-        applyTagEdit(docIndex, initialSelection, tagsBefore, result);
+      [this, docIndex, tagsBefore](const ActivityResult& result) {
+        applyTagEdit(docIndex, tagsBefore, result);
       });
 }
 
-void HighlightsActivity::applyTagEdit(const size_t docIndex, std::vector<uint16_t> previousTags,
-                                      const size_t tagsBefore, const ActivityResult& result) {
+void HighlightsActivity::applyTagEdit(const size_t docIndex, const size_t tagsBefore,
+                                      const ActivityResult& result) {
   // A size_t doc index is stable across the picker push: removeTag erases
   // from tags_ and rewrites tagIndices in place but never resizes or
   // reorders highlights_, and TagPickerActivity calls neither addHighlight
@@ -242,6 +242,10 @@ void HighlightsActivity::applyTagEdit(const size_t docIndex, std::vector<uint16_
     // -fno-exceptions means a mismatched alternative aborts with no
     // recovery, so this must never run on the cancelled path.
     const auto& selection = std::get<TagSelectionResult>(result.data);
+    // Capture AFTER the picker returns: it can delete a palette entry, which
+    // renumbers every tagIndices in place (HighlightDoc.cpp:30-32). A copy taken
+    // before the push names tags by the old numbering.
+    const std::vector<uint16_t> previousTags = highlightDoc_.highlights()[docIndex].tagIndices;
     highlightDoc_.setTags(docIndex, selection.tagIndices);
 
     if (!saveDisabled_) {

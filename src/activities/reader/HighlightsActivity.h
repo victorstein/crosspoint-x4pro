@@ -111,8 +111,7 @@ class HighlightsActivity final : public UiListActivity {
   void jumpToHighlight(size_t docIndex);
   void showActionChooser(size_t docIndex);
   void editTags(size_t docIndex);
-  void applyTagEdit(size_t docIndex, std::vector<uint16_t> previousTags, size_t tagsBefore,
-                    const ActivityResult& result);
+  void applyTagEdit(size_t docIndex, size_t tagsBefore, const ActivityResult& result);
   void showDeleteConfirmation(size_t docIndex);
   void deleteHighlight(size_t docIndex);
 
