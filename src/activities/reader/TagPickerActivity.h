@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "activities/UiListActivity.h"
+#include "components/OptionPopup.h"
 
 // Multi-select picker over a book's tag palette (HighlightDoc::tags()), plus
 // a "New tag..." row that pushes KeyboardEntryActivity and calls
@@ -30,6 +31,15 @@
 // a dedupe hit (addTag returning an existing index rather than adding one)
 // is never rolled back, since nothing new was added and removeTag would
 // strip a pre-existing tag off every highlight in the book.
+//
+// A tag row can also be long-pressed (touch) or held-Confirm-released
+// (physical buttons) to delete it from the palette entirely -- this removes
+// it from EVERY highlight in the book that carries it, not just the one
+// being tagged here, so a confirmation dialog names that scope explicitly.
+// Unlike the add path above, a failed delete-save cannot be rolled back:
+// removeTag rewrites every highlight's tag references in place and the set
+// of highlights that carried the tag is not retained, so the failure is
+// surfaced to the user instead.
 class TagPickerActivity final : public UiListActivity {
  public:
   explicit TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
@@ -37,6 +47,7 @@ class TagPickerActivity final : public UiListActivity {
 
   void onEnter() override;
   bool handleHomeGesture() override;
+  void render(RenderLock&&) override;
 
  private:
   static constexpr int MAX_ROWS = static_cast<int>(HighlightDoc::MAX_TAGS) + 1;  // palette + "New tag..." row
@@ -44,6 +55,9 @@ class TagPickerActivity final : public UiListActivity {
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
+  void onRowLongPress(int index) override;
+  bool handleCustomInput() override;
+  bool handleButtons() override;
   void onBackButton() override;
   const char* headerTitle() const override;
   void drawFooter() override;
@@ -52,15 +66,27 @@ class TagPickerActivity final : public UiListActivity {
   void startNewTagFlow();
   void reportAddTagFailure(const std::string& name);
   void commitAndFinish();
+  void showDeleteConfirmation(size_t tagIndex);
+  void deleteTag(size_t tagIndex);
 
   HighlightDoc& highlightDoc;
   const std::string bookPath_;
   const bool saveDisabled_;
   std::vector<uint16_t> initialSelection_;
 
-  // Index-aligned with highlightDoc.tags(). Fixed at MAX_TAGS capacity: the
-  // palette can only grow (via "New tag...") while this activity is open,
-  // never shrink, and HighlightDoc itself never lets tags() exceed MAX_TAGS.
+  bool confirmingDelete_ = false;
+  OptionPopup confirmPopup_;
+  // Tag index captured when the delete confirmation opens, so the popup's
+  // callback (which runs after further input has been processed) deletes the
+  // exact row that was long-pressed rather than re-deriving it from whatever
+  // nav.selected happens to be by the time the popup resolves.
+  size_t pendingDeleteIndex_ = 0;
+
+  // Index-aligned with highlightDoc.tags(). Fixed at MAX_TAGS capacity, but
+  // the palette is no longer grow-only: a long-press/held-Confirm delete can
+  // shrink it too. On delete, entries above the removed index are shifted
+  // down (never simply cleared -- see TagPickerActivity.cpp's deleteTag) so
+  // every remaining slot keeps meaning "is highlightDoc.tags()[i] checked".
   bool selected_[HighlightDoc::MAX_TAGS]{};
 
   // Rebuilt from highlightDoc.tags() on every buildScreen() call, never

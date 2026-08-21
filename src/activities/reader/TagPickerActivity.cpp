@@ -14,10 +14,16 @@
 
 namespace fui = freeink::ui;
 
+namespace {
+// Matches HighlightsActivity's own threshold for "this Confirm release was a
+// hold, not a tap" on boards with a physical Confirm button.
+constexpr int ENTER_DELETE_MODE_MS = 700;
+}  // namespace
+
 TagPickerActivity::TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                       HighlightDoc& highlightDoc, std::string bookPath, bool saveDisabled,
                                       std::vector<uint16_t> initialSelection)
-    : UiListActivity("TagPicker", renderer, mappedInput),
+    : UiListActivity("TagPicker", renderer, mappedInput, /*wantsTouchLongPress=*/true),
       highlightDoc(highlightDoc),
       bookPath_(std::move(bookPath)),
       saveDisabled_(saveDisabled),
@@ -76,7 +82,8 @@ void TagPickerActivity::buildScreen(UiScreen& screen) {
   props.items = rowItems_;
   props.count = static_cast<uint16_t>(tagCount + 1);
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;  // physical buttons stay in loop()
+  // Tap toggles/opens; long-press deletes (physical buttons stay in loop()).
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
   syncListViewport(screen, props);
   screen.list(props);
 }
@@ -181,6 +188,10 @@ void TagPickerActivity::onBackButton() {
 }
 
 bool TagPickerActivity::handleHomeGesture() {
+  // A dialog open means the current selection is mid-edit; committing it out
+  // from under the confirmation would finish the activity with a result the
+  // user never confirmed leaving.
+  if (confirmPopup_.isActive()) return true;
   commitAndFinish();
   return true;
 }
@@ -193,4 +204,136 @@ void TagPickerActivity::commitAndFinish() {
   }
   setResult(std::move(result));
   finish();
+}
+
+void TagPickerActivity::onRowLongPress(const int index) {
+  if (confirmPopup_.isActive()) return;
+  const int tagCount = static_cast<int>(highlightDoc.tags().size());
+  // rowActionTrampoline only bounds-checks against listCount() (tagCount+1),
+  // so onRowLongPress(tagCount) IS delivered for the "New tag..." row --
+  // there is nothing there to delete.
+  if (index < 0 || index >= tagCount) return;
+  app.clearTapFlash();
+  nav.selected = index;
+  showDeleteConfirmation(static_cast<size_t>(index));
+}
+
+void TagPickerActivity::showDeleteConfirmation(const size_t tagIndex) {
+  if (confirmPopup_.isActive()) return;
+  if (saveDisabled_) {
+    // The file may still hold the user's data (HighlightFile::LoadResult::Failed);
+    // never let a destructive palette change through in that state, matching
+    // HighlightsActivity::showDeleteConfirmation's own saveDisabled bail.
+    ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
+    requestUpdate();
+    return;
+  }
+
+  pendingDeleteIndex_ = tagIndex;
+  confirmingDelete_ = true;
+  const char* options[] = {tr(STR_CANCEL), tr(STR_DELETE)};
+  confirmPopup_.show(tr(STR_CONFIRM_DELETE_TAG), options, 2, 0, [this](const int idx) {
+    confirmingDelete_ = false;
+    if (idx == 1) deleteTag(pendingDeleteIndex_);
+    requestUpdate();
+  });
+  requestUpdate();
+}
+
+void TagPickerActivity::deleteTag(const size_t tagIndex) {
+  if (tagIndex >= highlightDoc.tags().size()) return;  // stale index; nothing to do
+
+  {
+    // The render task reads selected_/highlightDoc.tags() mid-buildScreen
+    // (item.label = tags[i].c_str(), item.toggleChecked = selected_[i]);
+    // TagPickerActivity has no rebuild-then-save recipe to fall back on --
+    // rowItems_ is populated inline in buildScreen and never cached (see the
+    // header's rowItems_ comment) -- so the mutation itself must be fenced,
+    // the same tool UiListActivity::moveSelectionTo uses for the identical
+    // loop-vs-render race.
+    RenderLock lock(*this);
+    highlightDoc.removeTag(static_cast<uint16_t>(tagIndex));
+    // selected_ is index-aligned with the palette; shift it to match so a
+    // still-checked tag above the deleted one keeps meaning the same tag.
+    // Never just clear selected_[tagIndex] and leave the rest -- that would
+    // silently reassign every higher slot to the wrong tag.
+    for (size_t j = tagIndex; j + 1 < HighlightDoc::MAX_TAGS; ++j) selected_[j] = selected_[j + 1];
+    selected_[HighlightDoc::MAX_TAGS - 1] = false;
+  }
+  requestUpdate();
+
+  // SD write after the lock releases. HighlightFile::save is read-only on the
+  // doc, so this is safe outside the lock.
+  switch (HighlightFile::save(bookPath_, highlightDoc)) {
+    case HighlightFile::SaveResult::Ok:
+      break;
+    case HighlightFile::SaveResult::TooLarge:
+    case HighlightFile::SaveResult::WriteFailed:
+      // NOTE: unlike every other mutation in this feature, this one CANNOT be
+      // rolled back. removeTag erases the tag and rewrites every highlight's
+      // references (HighlightDoc.cpp:21-34); addTag only appends, and the set
+      // of highlights that carried the tag was not retained. So memory and
+      // disk diverge here and the next successful save commits the deletion.
+      // Tell the user rather than failing silently.
+      ReaderUtils::showMessage(renderer, tr(STR_TAG_SAVE_FAILED));
+      requestUpdate();
+      break;
+  }
+}
+
+bool TagPickerActivity::handleCustomInput() {
+  if (confirmPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
+  if (confirmingDelete_) {
+    // Popup dismissed without a selection (Back button/gesture, or a tap
+    // outside it): cancel the pending delete, stay on this screen.
+    confirmingDelete_ = false;
+    requestUpdate();
+    return true;
+  }
+  return false;
+}
+
+bool TagPickerActivity::handleButtons() {
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    onBackButton();
+    return true;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    const int selected = nav.selected;
+    if (selected < 0 || selected >= listCount()) return true;
+    const int tagCount = static_cast<int>(highlightDoc.tags().size());
+    // Matches HighlightsActivity: a held Confirm release on a tag row (not
+    // the "New tag..." row, which has nothing to delete) opens the delete
+    // confirmation instead of toggling.
+    if (selected < tagCount && mappedInput.getHeldTime() > ENTER_DELETE_MODE_MS) {
+      onRowLongPress(selected);
+    } else {
+      activateIndex(selected);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+void TagPickerActivity::render(RenderLock&&) {
+  // Duplicates UiListActivity::render()'s body (chrome, app, rebuild-retry
+  // loop, footer, display) with the delete-confirmation popup interleaved
+  // between the app render and the footer -- exactly where
+  // HighlightsActivity's own render() puts the same check, and for the same
+  // reason: the base render() has no seam to inject it into.
+  renderer.clearScreen();
+  drawChrome();
+  renderUi();
+  for (int pass = 0; nav.consumeRebuildNeeded() && pass < 8; ++pass) {
+    renderer.clearScreen();
+    drawChrome();
+    renderUi();
+  }
+
+  if (confirmPopup_.processRender(renderer, mappedInput)) return;
+
+  drawFooter();
+  renderer.displayBuffer();
 }
