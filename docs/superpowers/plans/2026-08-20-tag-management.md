@@ -12,7 +12,13 @@
 
 **Delivery:** fork-only.
 
-> **v3 — revised after two adversarial reviews.** v1 contained four instructions that would have shipped broken behaviour (a rollback that deletes a pre-existing tag, a long-press that is dead on arrival, nested popups that free the running callback, and a `selected_` reset that wipes the user's tags), two guaranteed build/verification failures, and three misdiagnoses that would have put defensive code in the wrong place while leaving the real stale state untouched. All corrected below.
+> **v3 — revised after two adversarial reviews.**
+>
+> **Round one** found four instructions that would have shipped broken behaviour — a rollback that deletes a pre-existing tag, a long-press that is dead on arrival, nested popups that free the running callback, and a `selected_` reset that wipes the user's tags — plus two guaranteed build/verification failures and three misdiagnoses that put defensive code in the wrong place while leaving the real stale state untouched.
+>
+> **Round two** found that the fixes were sound *inside* each task but were not carried across to the analogous situation in the next one: retagging wrote with no `saveDisabled_` gate, tag deletion had no save-failure story for the one mutation here that cannot be rolled back, the `filterTagIndex_` fix range-checked instead of size-compared (missing the case its own paragraph diagnosed), long-press was enabled for touch only, and the Task 4 rebuilds ran unlocked despite Task 3 reasoning about the identical race.
+>
+> That pattern — correct locally, inconsistent at the seams — is the one to watch while implementing.
 
 ---
 
@@ -89,8 +95,10 @@ TEST(HighlightDocSetTags, RejectsAnOutOfRangeEntryIndexWithoutTouchingAnything) 
 
   EXPECT_FALSE(doc.setTags(7, {}));
   EXPECT_FALSE(doc.setTags(1, {})) << "one past the end is out of range";
-  // The contract says the entry is untouched on rejection — assert it, or an
-  // implementation that clobbers before range-checking passes.
+  // Entry 0 must be intact afterwards. This is an off-by-one test, not an
+  // atomicity test: an implementation that cleared highlights_[index] before
+  // range-checking would write out of bounds at [7]/[1] and never touch entry 0,
+  // so only a sanitiser build catches that.
   ASSERT_EQ(doc.highlights()[0].tagIndices.size(), 1u);
   EXPECT_EQ(doc.tags()[doc.highlights()[0].tagIndices[0]], "alpha");
 }
