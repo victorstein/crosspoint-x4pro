@@ -372,20 +372,10 @@ void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<ui
 
   HighlightEntry entry;
   entry.spineIndex = spineIndex;
-  const std::string reference = verseReference(range.start);
-  const std::string passage = selectionLabel(lo, hi);
-  // addHighlight truncates to 72 BYTES (Utf8.h:26-31), and the separator costs
-  // 4 of them. A long TOC title can leave no room for a useful snippet, so the
-  // reference is kept whole rather than shipping a truncated one.
-  static constexpr size_t LABEL_BUDGET = 72;
-  static constexpr size_t MIN_SNIPPET_BYTES = 16;
-  if (reference.empty()) {
-    entry.label = passage;
-  } else if (reference.size() + 4 + MIN_SNIPPET_BYTES > LABEL_BUDGET) {
-    entry.label = reference;
-  } else {
-    entry.label = reference + " \xc2\xb7 " + passage;
-  }
+  // Separate fields, so the two no longer compete for one 72-byte budget:
+  // addHighlight caps each independently.
+  entry.reference = verseReference(range.start);
+  entry.label = selectionLabel(lo, hi);
   // end is the last word's offset + 1: contains() tests a word's start offset.
   entry.range = range;
   // Truncated to MAX_TAGS_PER_HIGHLIGHT by addHighlight if ever oversized, but
