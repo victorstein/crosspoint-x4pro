@@ -108,7 +108,11 @@ void HighlightsActivity::openTagFilter() {
                          [this](const ActivityResult& result) {
                            // Cancelled leaves the current filter alone, matching the
                            // Back-from-picker behaviour everywhere else in this screen.
-                           if (result.isCancelled) return;
+                           // Guarded on the alternative, not just isCancelled: any
+                           // finish() that forgets to set a result leaves monostate
+                           // here, and std::get on the wrong alternative aborts under
+                           // -fno-exceptions.
+                           if (result.isCancelled || !std::holds_alternative<TagSelectionResult>(result.data)) return;
                            const auto& selection = std::get<TagSelectionResult>(result.data);
                            if (selection.tagIndices.empty()) {
                              filterTagIndex_.reset();

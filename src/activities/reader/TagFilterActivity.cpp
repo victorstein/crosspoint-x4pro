@@ -61,6 +61,20 @@ void TagFilterActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
+void TagFilterActivity::onBackButton() {
+  ActivityResult result;
+  result.isCancelled = true;
+  setResult(std::move(result));
+  finish();
+}
+
+bool TagFilterActivity::handleHomeGesture() {
+  // Consumed rather than left to ActivityManager's "go home", which would
+  // abandon the reader entirely from a filter screen. Cancelling matches Back.
+  onBackButton();
+  return true;
+}
+
 void TagFilterActivity::activateIndex(const int index) {
   if (index < 0 || index >= listCount()) return;
   nav.selected = index;

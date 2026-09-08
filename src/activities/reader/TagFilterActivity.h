@@ -18,6 +18,14 @@ class TagFilterActivity final : public UiListActivity {
   TagFilterActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const HighlightDoc& highlightDoc);
 
  private:
+  // Both exits MUST set a result. UiListActivity::onBackButton is a bare
+  // finish(), which leaves ActivityResult default-constructed: isCancelled
+  // false and the variant holding monostate. A consumer that then reads its
+  // own alternative calls std::get on the wrong one, and with -fno-exceptions
+  // that aborts.
+  void onBackButton() override;
+  bool handleHomeGesture() override;
+
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
