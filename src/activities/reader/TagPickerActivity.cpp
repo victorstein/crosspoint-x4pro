@@ -10,6 +10,7 @@
 #include "../util/KeyboardEntryActivity.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "TagRowMapping.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
@@ -41,9 +42,7 @@ void TagPickerActivity::onEnter() {
 int TagPickerActivity::listCount() const { return static_cast<int>(highlightDoc.tags().size()) + 2; }
 
 int TagPickerActivity::tagIndexForRow(const int row) const {
-  const int tagCount = static_cast<int>(highlightDoc.tags().size());
-  if (row <= DONE_ROW || row > tagCount) return -1;  // "Done", "New tag...", or out of range
-  return row - 1;
+  return TagRows::tagIndexForRow(row, static_cast<int>(highlightDoc.tags().size()));
 }
 
 const char* TagPickerActivity::headerTitle() const { return tr(STR_TAGS); }
