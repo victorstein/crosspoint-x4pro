@@ -13,8 +13,8 @@
 size_t TextBlock::arenaSize(const uint16_t wordCount, const bool hasFocus, const uint16_t textBytes) {
   // Layout documented in TextBlock.h: the 32-bit array first, then 16-bit arrays,
   // then 8-bit arrays, then text.
-  size_t size = static_cast<size_t>(wordCount) *
-                (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(int16_t) + sizeof(uint8_t));
+  size_t size =
+      static_cast<size_t>(wordCount) * (sizeof(uint32_t) + sizeof(uint16_t) + sizeof(int16_t) + sizeof(uint8_t));
   if (hasFocus) {
     size += static_cast<size_t>(wordCount) * (sizeof(uint16_t) + sizeof(uint8_t));
   }
@@ -57,8 +57,8 @@ TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<in
   // Focus annotations are optional: empty vectors mean no word in this block has a split.
   // When present, they must be sized in lockstep with words[].
   const bool hasFocus = !focusBoundary.empty();
-  if (words.size() != wordXpos.size() || words.size() != wordStyles.size() ||
-      words.size() != visibleOffsets.size() || words.size() > 10000 ||
+  if (words.size() != wordXpos.size() || words.size() != wordStyles.size() || words.size() != visibleOffsets.size() ||
+      words.size() > 10000 ||
       (hasFocus && (words.size() != focusBoundary.size() || words.size() != focusSuffixX.size()))) {
     LOG_ERR("TXB",
             "Construction failed: size mismatch (words=%u, xpos=%u, styles=%u, visibleOffsets=%u, boundary=%u, "

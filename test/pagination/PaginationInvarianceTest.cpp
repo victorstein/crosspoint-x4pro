@@ -74,8 +74,8 @@ struct Layout {
   size_t lineCount = 0;
 };
 
-Layout layoutAt(const std::vector<SourceWord>& source, const int fontId, const int viewport,
-                const bool hyphenation, const BlockStyle& style = BlockStyle{}) {
+Layout layoutAt(const std::vector<SourceWord>& source, const int fontId, const int viewport, const bool hyphenation,
+                const BlockStyle& style = BlockStyle{}) {
   const GfxRenderer renderer(halDisplay);
   ParsedText parsed(/*extraParagraphSpacing=*/false, hyphenation, /*focusReading=*/false, style);
   for (const auto& w : source) {
@@ -84,8 +84,7 @@ Layout layoutAt(const std::vector<SourceWord>& source, const int fontId, const i
 
   Layout out;
   parsed.layoutAndExtractLines(
-      renderer, fontId, static_cast<uint16_t>(viewport),
-      [&](const std::shared_ptr<TextBlock> block, uint32_t) {
+      renderer, fontId, static_cast<uint16_t>(viewport), [&](const std::shared_ptr<TextBlock> block, uint32_t) {
         if (!block || !block->valid()) return;
         for (uint16_t i = 0; i < block->wordCount(); ++i) {
           out.words.push_back({block->wordText(i), block->wordVisibleOffset(i), out.lineCount});
@@ -96,14 +95,14 @@ Layout layoutAt(const std::vector<SourceWord>& source, const int fontId, const i
 }
 
 const std::vector<std::string> kParagraph = {
-    "The",   "quick", "brown", "fox",  "jumps",  "over",   "the",    "lazy",   "dog",
-    "while", "eleven",  "wandering",  "minstrels", "hummed", "quietly", "beneath", "windswept", "battlements",
-    "and",   "then",  "some",  "more", "words",  "follow", "here",   "too"};
+    "The",   "quick",  "brown",     "fox",       "jumps",  "over",    "the",     "lazy",      "dog",
+    "while", "eleven", "wandering", "minstrels", "hummed", "quietly", "beneath", "windswept", "battlements",
+    "and",   "then",   "some",      "more",      "words",  "follow",  "here",    "too"};
 
 // Long enough to force hyphenation at narrow widths and large sizes.
-const std::vector<std::string> kHyphenatable = {
-    "Supercalifragilistic", "antidisestablishmentarianism", "extraordinarily",
-    "incomprehensibilities", "counterrevolutionaries", "internationalization"};
+const std::vector<std::string> kHyphenatable = {"Supercalifragilistic",   "antidisestablishmentarianism",
+                                                "extraordinarily",        "incomprehensibilities",
+                                                "counterrevolutionaries", "internationalization"};
 
 // Maps each placed word back to the source word whose range contains its
 // anchor. Returns nullptr when no source word claims it, which is itself a
@@ -161,8 +160,8 @@ void expectFragmentsReconstructSource(const std::vector<SourceWord>& source, con
     uint32_t expectedNext = src.offset;
     for (size_t i = 0; i < fragments.size(); ++i) {
       EXPECT_EQ(fragments[i].offset, expectedNext)
-          << "fragment '" << fragments[i].text << "' of '" << src.text << "' is anchored at "
-          << fragments[i].offset << " but the preceding text implies " << expectedNext << " at " << context;
+          << "fragment '" << fragments[i].text << "' of '" << src.text << "' is anchored at " << fragments[i].offset
+          << " but the preceding text implies " << expectedNext << " at " << context;
       const std::string body = withoutInsertedHyphen(fragments[i].text, i + 1 == fragments.size());
       rebuilt += body;
       expectedNext += visibleCpCount(body);
@@ -197,8 +196,8 @@ TEST(RepaginationInvariance, ARecordedAnchorStillNamesTheSameWordAfterRepaginati
   const auto source = makeSource(kParagraph);
 
   const Layout reference = layoutAt(source, /*fontId=*/10, /*viewport=*/300, /*hyphenation=*/false);
-  const auto foxIt = std::find_if(reference.words.begin(), reference.words.end(),
-                                  [](const PlacedWord& w) { return w.text == "fox"; });
+  const auto foxIt =
+      std::find_if(reference.words.begin(), reference.words.end(), [](const PlacedWord& w) { return w.text == "fox"; });
   ASSERT_NE(foxIt, reference.words.end()) << "reference layout did not place the probe word";
   const uint32_t recordedAnchor = foxIt->offset;
 
@@ -318,8 +317,8 @@ TEST(HyphenSplitAnchors, EachFragmentAnchorEqualsThePreviousPlusItsCodepoints) {
         const SourceWord* owner = ownerOf(source, w.offset);
         ASSERT_NE(owner, nullptr);
         if (w.offset == owner->offset) continue;
-        EXPECT_GT(w.offset, owner->offset) << "split anchor at or before the word start at "
-                                           << describe(fontId, viewport);
+        EXPECT_GT(w.offset, owner->offset)
+            << "split anchor at or before the word start at " << describe(fontId, viewport);
         EXPECT_LT(w.offset, owner->offset + owner->cpLen)
             << "split anchor past the end of '" << owner->text << "' at " << describe(fontId, viewport);
       }

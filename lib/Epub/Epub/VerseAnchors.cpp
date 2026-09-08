@@ -35,16 +35,13 @@ void XMLCALL onStart(void* userData, const XML_Char* name, const XML_Char** atts
     // The %c catches trailing junk, so "chapter1_verse2x" is not a verse marker.
     if (sscanf(atts[i + 1], "chapter%u_verse%u%c", &chapter, &verse, &tail) == 2 && chapter <= UINT16_MAX &&
         verse <= UINT16_MAX) {
-      self->anchors.push_back(
-          {self->counter.offset, static_cast<uint16_t>(chapter), static_cast<uint16_t>(verse)});
+      self->anchors.push_back({self->counter.offset, static_cast<uint16_t>(chapter), static_cast<uint16_t>(verse)});
     }
     break;
   }
 }
 
-void XMLCALL onEnd(void* userData, const XML_Char* name) {
-  static_cast<State*>(userData)->counter.onEndElement(name);
-}
+void XMLCALL onEnd(void* userData, const XML_Char* name) { static_cast<State*>(userData)->counter.onEndElement(name); }
 
 // Mirrors ChapterHtmlSlimParser::defaultHandlerExpand. Under XML_GE=0 expat
 // reports every undeclared general entity here rather than to the character

@@ -16,9 +16,7 @@ TEST(DocReadStatus, ParseFailureIsReported) {
   EXPECT_EQ(classifyDocRead(true, false, true), DocReadStatus::ParseError);
 }
 
-TEST(DocReadStatus, GoodReadIsOk) {
-  EXPECT_EQ(classifyDocRead(true, false, false), DocReadStatus::Ok);
-}
+TEST(DocReadStatus, GoodReadIsOk) { EXPECT_EQ(classifyDocRead(true, false, false), DocReadStatus::Ok); }
 
 TEST(DocReadStatus, OnlyMissingIsSafeToOverwrite) {
   // The rule the caller depends on: exactly one failure status means "no data

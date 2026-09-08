@@ -3,17 +3,17 @@
 #include <GfxRenderer.h>
 #include <I18n.h>
 
-#include "MappedInputManager.h"
-#include "activities/ActivityResult.h"
 #include "../../util/HighlightFile.h"
+#include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "TagRowMapping.h"
+#include "activities/ActivityResult.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
-TagFilterActivity::TagFilterActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                     HighlightDoc& highlightDoc, std::string bookPath, const bool saveDisabled)
+TagFilterActivity::TagFilterActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
+                                     std::string bookPath, const bool saveDisabled)
     : UiListActivity("TagFilter", renderer, mappedInput, /*wantsTouchLongPress=*/true),
       highlightDoc_(highlightDoc),
       bookPath_(std::move(bookPath)),
@@ -31,11 +31,11 @@ void TagFilterActivity::drawFooter() {
 void TagFilterActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-                                     static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-                                     static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) +
-                                                          metrics.buttonHintsHeight),
-                                     static_cast<int16_t>(safe.x)});
+  screen.setContentMargin(
+      fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
+                  static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.buttonHintsHeight),
+                  static_cast<int16_t>(safe.x)});
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   // Rebuilt every call rather than cached: label pointers borrow the palette's

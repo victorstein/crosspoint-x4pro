@@ -49,14 +49,12 @@ TEST(VerseAnchorsScan, CountsAKnownEntityAsExactlyOneCodepoint) {
 TEST(VerseAnchorsScan, DegradesToEmptyWhenAnEntityCannotBeResolved) {
   // No DOCTYPE means an undeclared entity is a hard parse error. Returning
   // nothing costs the label; returning a partial list would misplace it.
-  const char* doc =
-      "<html><body><p><span id=\"chapter1_verse1\"></span>ab&nbsp;cd</p></body></html>";
+  const char* doc = "<html><body><p><span id=\"chapter1_verse1\"></span>ab&nbsp;cd</p></body></html>";
   EXPECT_TRUE(VerseAnchors::scan(doc, strlen(doc)).empty());
 }
 
 TEST(VerseAnchorsScan, SkipsUppercaseNonVisibleElementsInsideBody) {
-  const char* doc =
-      "<html><body><TITLE>skipme</TITLE><span id=\"chapter1_verse1\"></span>abc</body></html>";
+  const char* doc = "<html><body><TITLE>skipme</TITLE><span id=\"chapter1_verse1\"></span>abc</body></html>";
   const auto a = VerseAnchors::scan(doc, strlen(doc));
   ASSERT_EQ(a.size(), 1u);
   EXPECT_EQ(a[0].offset, 0u) << "the non-visible test is case-insensitive";
@@ -109,7 +107,9 @@ TEST(VerseAnchorsScanner, ChunkedFeedingMatchesOneShotAcrossAwkwardBoundaries) {
   // would drift from the one-shot result.
   const char* doc =
       "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"xhtml11.dtd\">"
-      "<html><body><p><span id=\"chapter2_verse4\"></span>\xc3\xa9" "ab&nbsp;c" "\xc3\xa9"
+      "<html><body><p><span id=\"chapter2_verse4\"></span>\xc3\xa9"
+      "ab&nbsp;c"
+      "\xc3\xa9"
       "<span id=\"chapter2_verse5\"></span>d</p></body></html>";
   const size_t len = strlen(doc);
   const auto oneShot = VerseAnchors::scan(doc, len);

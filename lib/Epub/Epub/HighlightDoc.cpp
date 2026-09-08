@@ -45,8 +45,7 @@ void HighlightDoc::removeTag(uint16_t index) {
 
   for (auto& highlight : highlights_) {
     auto& indices = highlight.tagIndices;
-    indices.erase(std::remove_if(indices.begin(), indices.end(),
-                                  [index](const uint16_t ref) { return ref == index; }),
+    indices.erase(std::remove_if(indices.begin(), indices.end(), [index](const uint16_t ref) { return ref == index; }),
                   indices.end());
     for (uint16_t& ref : indices) {
       if (ref > index) ref = static_cast<uint16_t>(ref - 1);

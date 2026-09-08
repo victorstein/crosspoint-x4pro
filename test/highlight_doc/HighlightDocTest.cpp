@@ -1,6 +1,5 @@
-#include <gtest/gtest.h>
-
 #include <ArduinoJson.h>
+#include <gtest/gtest.h>
 
 #include "Epub/HighlightDoc.h"
 
@@ -171,8 +170,7 @@ TEST(HighlightDoc, WorstCaseDocumentStaysUnderTheSaveBudget) {
   // references per entry, and a label made entirely of characters JSON escapes.
   HighlightDoc doc;
   for (size_t t = 0; t < HighlightDoc::MAX_TAGS; ++t) {
-    ASSERT_TRUE(doc.addTag(std::string(HighlightDoc::MAX_TAG_NAME_BYTES, 'a' + static_cast<char>(t % 26)))
-                    .has_value());
+    ASSERT_TRUE(doc.addTag(std::string(HighlightDoc::MAX_TAG_NAME_BYTES, 'a' + static_cast<char>(t % 26))).has_value());
   }
   std::vector<uint16_t> refs;
   for (size_t i = 0; i < HighlightDoc::MAX_TAGS_PER_HIGHLIGHT; ++i) refs.push_back(static_cast<uint16_t>(i));

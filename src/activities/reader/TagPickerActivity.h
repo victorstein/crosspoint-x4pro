@@ -43,7 +43,7 @@
 class TagPickerActivity final : public UiListActivity {
  public:
   explicit TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
-                              std::string bookPath, bool saveDisabled, std::vector<uint16_t> initialSelection = {});
+                             std::string bookPath, bool saveDisabled, std::vector<uint16_t> initialSelection = {});
 
   void onEnter() override;
   bool handleHomeGesture() override;

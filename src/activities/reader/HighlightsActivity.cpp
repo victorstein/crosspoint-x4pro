@@ -268,9 +268,7 @@ void HighlightsActivity::editTags(const size_t docIndex) {
   startActivityForResult(
       std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_,
                                           initialSelection),
-      [this, docIndex, filterTagName](const ActivityResult& result) {
-        applyTagEdit(docIndex, filterTagName, result);
-      });
+      [this, docIndex, filterTagName](const ActivityResult& result) { applyTagEdit(docIndex, filterTagName, result); });
 }
 
 void HighlightsActivity::applyTagEdit(const size_t docIndex, const std::string& filterTagName,

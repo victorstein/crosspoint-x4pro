@@ -21,9 +21,8 @@ namespace {
 constexpr int ENTER_DELETE_MODE_MS = 700;
 }  // namespace
 
-TagPickerActivity::TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                      HighlightDoc& highlightDoc, std::string bookPath, bool saveDisabled,
-                                      std::vector<uint16_t> initialSelection)
+TagPickerActivity::TagPickerActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, HighlightDoc& highlightDoc,
+                                     std::string bookPath, bool saveDisabled, std::vector<uint16_t> initialSelection)
     : UiListActivity("TagPicker", renderer, mappedInput, /*wantsTouchLongPress=*/true),
       highlightDoc(highlightDoc),
       bookPath_(std::move(bookPath)),
@@ -57,11 +56,11 @@ void TagPickerActivity::drawFooter() {
 void TagPickerActivity::buildScreen(UiScreen& screen) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
-  screen.setContentMargin(fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
-                                      static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
-                                      static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) +
-                                                            metrics.buttonHintsHeight),
-                                      static_cast<int16_t>(safe.x)});
+  screen.setContentMargin(
+      fui::Insets{static_cast<int16_t>(safe.y + metrics.topPadding + metrics.headerHeight),
+                  static_cast<int16_t>(renderer.getScreenWidth() - (safe.x + safe.width)),
+                  static_cast<int16_t>(renderer.getScreenHeight() - (safe.y + safe.height) + metrics.buttonHintsHeight),
+                  static_cast<int16_t>(safe.x)});
   screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
 
   // Read live every call (not cached from onEnter): "New tag..." can grow

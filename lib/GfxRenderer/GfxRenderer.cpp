@@ -1188,8 +1188,7 @@ void GfxRenderer::invertRect(const int x, const int y, const int width, const in
   phyY1 = std::min(phyY1, originY + writeRows - 1);
   if (phyY0 > phyY1) return;
 
-  bitblit::invertRect(target, static_cast<int32_t>(panelWidthBytes), phyX0, phyY0 - originY, phyX1,
-                      phyY1 - originY);
+  bitblit::invertRect(target, static_cast<int32_t>(panelWidthBytes), phyX0, phyY0 - originY, phyX1, phyY1 - originY);
 }
 
 void GfxRenderer::maskRoundedRectOutsideCorners(const int x, const int y, const int width, const int height,
