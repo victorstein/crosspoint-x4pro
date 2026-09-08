@@ -274,7 +274,7 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
 
   const auto localPath = epub->getSpineItem(spineIndex).href;
   const auto htmlDir = epub->getCachePath() + "/html";
-  const auto htmlPath = htmlDir + "/" + std::to_string(spineIndex) + ".html";
+  const auto htmlPath = htmlCachePath();
   const auto tmpHtmlPath = htmlDir + "/.tmp_" + std::to_string(spineIndex) + ".html";
 
   // Create cache directory if it doesn't exist
@@ -457,10 +457,11 @@ bool Section::buildSomeMore(const int maxPages) {
   }
 }
 
-bool Section::hasHtmlCache() const {
-  const std::string htmlPath = epub->getCachePath() + "/html/" + std::to_string(spineIndex) + ".html";
-  return Storage.exists(htmlPath.c_str());
+std::string Section::htmlCachePath() const {
+  return epub->getCachePath() + "/html/" + std::to_string(spineIndex) + ".html";
 }
+
+bool Section::hasHtmlCache() const { return Storage.exists(htmlCachePath().c_str()); }
 
 std::optional<uint16_t> Section::findAnchorDuringBuild(const std::string& anchor) const {
   if (!build_ || !build_->parser) return std::nullopt;

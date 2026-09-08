@@ -349,7 +349,8 @@ void EpubReaderActivity::openHighlightPassage() {
   startActivityForResult(
       std::make_unique<PassageSelectActivity>(renderer, mappedInput, std::move(page), orientedMarginLeft,
                                               orientedMarginTop, columnRight, highlightDoc, epub->getPath(),
-                                              static_cast<uint16_t>(currentSpineIndex), highlightsSaveDisabled),
+                                              static_cast<uint16_t>(currentSpineIndex), highlightsSaveDisabled, *epub,
+                                              *section, static_cast<uint16_t>(section->currentPage)),
       [this](const ActivityResult&) { requestUpdate(); });
 }
 

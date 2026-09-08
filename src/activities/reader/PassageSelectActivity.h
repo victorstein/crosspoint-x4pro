@@ -1,8 +1,10 @@
 #pragma once
 
+#include <Epub.h>
 #include <Epub/HighlightDoc.h>
 #include <Epub/HighlightGeometry.h>
 #include <Epub/Page.h>
+#include <Epub/Section.h>
 #include <Epub/VisibleRange.h>
 
 #include <cstdint>
@@ -38,7 +40,8 @@ class PassageSelectActivity final : public Activity {
  public:
   explicit PassageSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::unique_ptr<Page> page,
                                  int marginLeft, int marginTop, int columnRight, HighlightDoc& highlightDoc,
-                                 std::string bookPath, uint16_t spineIndex, bool saveDisabled)
+                                 std::string bookPath, uint16_t spineIndex, bool saveDisabled, Epub& epub,
+                                 Section& section, uint16_t pageNumber)
       : Activity("PassageSelect", renderer, mappedInput),
         page(std::move(page)),
         marginLeft(marginLeft),
@@ -47,7 +50,10 @@ class PassageSelectActivity final : public Activity {
         highlightDoc(highlightDoc),
         bookPath(std::move(bookPath)),
         spineIndex(spineIndex),
-        saveDisabled(saveDisabled) {}
+        saveDisabled(saveDisabled),
+        epub(epub),
+        section(section),
+        currentPageNumber(pageNumber) {}
 
   void onEnter() override;
   void loop() override;
@@ -83,6 +89,10 @@ class PassageSelectActivity final : public Activity {
   // token text is re-read from the block arena instead of kept resident for
   // every word on the page.
   std::string selectionLabel(int lo, int hi) const;
+  // "Mateo 11:19" for a book with verse anchors, empty otherwise. Empty is a
+  // supported outcome, not a failure: a non-Bible EPUB simply keeps the
+  // passage-only label.
+  std::string verseReference(uint32_t startOffset) const;
   void drawSelectionOutline();
   void drawHints() const;
 
@@ -93,6 +103,11 @@ class PassageSelectActivity final : public Activity {
   HighlightDoc& highlightDoc;
   const std::string bookPath;
   const uint16_t spineIndex;
+  // Safe to hold by reference: ActivityManager runs only the top activity, so
+  // the reader's own section.reset() paths cannot fire while this is on top.
+  Epub& epub;
+  Section& section;
+  uint16_t currentPageNumber;
   const bool saveDisabled;
 
   int fontId = 0;

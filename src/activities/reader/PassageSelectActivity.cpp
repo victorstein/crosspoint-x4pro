@@ -1,9 +1,12 @@
 #include "PassageSelectActivity.h"
 
+#include <Epub/VerseAnchors.h>
 #include <Epub/blocks/TextBlock.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
+#include <HalStorage.h>
 #include <I18n.h>
+#include <Logging.h>
 #include <Memory.h>
 
 #include <algorithm>
@@ -111,6 +114,51 @@ void PassageSelectActivity::extractWords() {
     }
     rowCount++;
   }
+}
+
+std::string PassageSelectActivity::verseReference(const uint32_t startOffset) const {
+  // The inflated bytes are already on SD from the build; re-inflating the zip
+  // entry instead would stall the UI thread for seconds on a large spine item,
+  // at the moment the user taps Highlight.
+  if (!section.hasHtmlCache()) return {};
+
+  HalFile file;
+  if (!Storage.openFileForRead("PSA", section.htmlCachePath(), file)) return {};
+
+  VerseAnchors::Scanner scanner;
+  if (!scanner.valid()) return {};
+
+  // Streamed rather than read whole: a spine item can be megabytes, and the
+  // repo caps stack locals well below a useful chunk size.
+  constexpr size_t CHUNK_BYTES = 1024;
+  auto chunk = makeUniqueNoThrow<char[]>(CHUNK_BYTES);
+  if (!chunk) {
+    LOG_ERR("PSA", "OOM: %u bytes for verse scan", static_cast<unsigned>(CHUNK_BYTES));
+    return {};
+  }
+
+  bool ok = true;
+  for (;;) {
+    const int read = file.read(chunk.get(), CHUNK_BYTES);
+    if (read <= 0) {
+      ok = scanner.feed("", 0, /*isFinal=*/true);
+      break;
+    }
+    ok = scanner.feed(chunk.get(), static_cast<size_t>(read), /*isFinal=*/false);
+    if (!ok) break;
+  }
+  if (!ok) return {};
+
+  const auto anchors = scanner.take();
+  const std::string verse = VerseAnchors::format(VerseAnchors::find(anchors, startOffset));
+  if (verse.empty()) return {};
+
+  // Book name comes from the covering TOC entry, never a built-in table: a
+  // hardcoded list would be wrong in every other language and every non-Bible book.
+  const auto spine = epub.getSpineItem(spineIndex);
+  if (spine.tocIndex < 0) return verse;
+  const auto toc = epub.getTocItem(spine.tocIndex);
+  return toc.title.empty() ? verse : toc.title + " " + verse;
 }
 
 std::string PassageSelectActivity::selectionLabel(const int lo, const int hi) const {
@@ -260,7 +308,20 @@ void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<ui
 
   HighlightEntry entry;
   entry.spineIndex = spineIndex;
-  entry.label = selectionLabel(lo, hi);
+  const std::string reference = verseReference(minOffset);
+  const std::string passage = selectionLabel(lo, hi);
+  // addHighlight truncates to 72 BYTES (Utf8.h:26-31), and the separator costs
+  // 4 of them. A long TOC title can leave no room for a useful snippet, so the
+  // reference is kept whole rather than shipping a truncated one.
+  static constexpr size_t LABEL_BUDGET = 72;
+  static constexpr size_t MIN_SNIPPET_BYTES = 16;
+  if (reference.empty()) {
+    entry.label = passage;
+  } else if (reference.size() + 4 + MIN_SNIPPET_BYTES > LABEL_BUDGET) {
+    entry.label = reference;
+  } else {
+    entry.label = reference + " \xc2\xb7 " + passage;
+  }
   // end = last word's offset + 1: contains() tests a word's start offset,
   // offsets are strictly increasing across tokens, and no path emits two
   // words at the same offset (verified; see the plan).

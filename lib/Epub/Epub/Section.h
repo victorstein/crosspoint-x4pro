@@ -127,6 +127,10 @@ class Section {
   // True if this spine's unzipped HTML is already cached, so a build won't pay the (multi-second on a
   // giant spine) zip inflation. Lets the reader skip the indexing popup on a fast reopen/rebuild.
   bool hasHtmlCache() const;
+  // Inflated copy of this spine item on SD, written during the build. Callers
+  // that need the source bytes should read this rather than re-inflating the
+  // zip entry, which is a multi-second stall on a large spine item.
+  std::string htmlCachePath() const;
 
   // Look up the page number for an anchor id from the section cache file.
   std::optional<uint16_t> getPageForAnchor(const std::string& anchor) const;

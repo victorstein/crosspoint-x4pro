@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstring>
 
 #include "VerseAnchors.h"
@@ -100,4 +101,34 @@ TEST(VerseAnchorsFormat, RendersChapterColonVerseAndEmptyForNull) {
   const VerseAnchors::VerseAnchor a{0, 11, 19};
   EXPECT_EQ(VerseAnchors::format(&a), "11:19");
   EXPECT_EQ(VerseAnchors::format(nullptr), "");
+}
+
+TEST(VerseAnchorsScanner, ChunkedFeedingMatchesOneShotAcrossAwkwardBoundaries) {
+  // Small chunks deliberately split multi-byte codepoints and entity runs. If
+  // expat's buffering or the codepoint counter mishandled either, the offsets
+  // would drift from the one-shot result.
+  const char* doc =
+      "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"xhtml11.dtd\">"
+      "<html><body><p><span id=\"chapter2_verse4\"></span>\xc3\xa9" "ab&nbsp;c" "\xc3\xa9"
+      "<span id=\"chapter2_verse5\"></span>d</p></body></html>";
+  const size_t len = strlen(doc);
+  const auto oneShot = VerseAnchors::scan(doc, len);
+  ASSERT_EQ(oneShot.size(), 2u);
+
+  for (const size_t chunk : {size_t{1}, size_t{3}, size_t{7}, size_t{64}}) {
+    VerseAnchors::Scanner scanner;
+    ASSERT_TRUE(scanner.valid());
+    bool ok = true;
+    for (size_t off = 0; off < len && ok; off += chunk) {
+      const size_t n = std::min(chunk, len - off);
+      ok = scanner.feed(doc + off, n, off + n >= len);
+    }
+    ASSERT_TRUE(ok) << "chunk size " << chunk;
+    const auto streamed = scanner.take();
+    ASSERT_EQ(streamed.size(), oneShot.size()) << "chunk size " << chunk;
+    for (size_t i = 0; i < streamed.size(); i++) {
+      EXPECT_EQ(streamed[i].offset, oneShot[i].offset) << "chunk size " << chunk << ", anchor " << i;
+      EXPECT_EQ(streamed[i].verse, oneShot[i].verse) << "chunk size " << chunk;
+    }
+  }
 }

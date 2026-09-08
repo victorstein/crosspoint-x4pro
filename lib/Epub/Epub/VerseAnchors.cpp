@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <utility>
 
 #include "VisibleOffsetCounter.h"
@@ -63,21 +64,51 @@ void XMLCALL onDefault(void* userData, const XML_Char* s, const int len) {
 
 }  // namespace
 
-std::vector<VerseAnchor> scan(const char* xhtml, const size_t length) {
-  State state;
-  state.anchors.reserve(64);  // a long chapter runs to ~176 verses; 64 covers most
+Scanner::Scanner() {
+  auto* state = new (std::nothrow) State();
+  if (!state) return;
+  state->anchors.reserve(64);  // a long chapter runs to ~176 verses; 64 covers most
 
   XML_Parser parser = XML_ParserCreate(nullptr);
-  if (!parser) return {};
-  XML_SetUserData(parser, &state);
+  if (!parser) {
+    delete state;
+    return;
+  }
+  XML_SetUserData(parser, state);
   XML_SetElementHandler(parser, onStart, onEnd);
   XML_SetCharacterDataHandler(parser, onText);
   XML_SetDefaultHandlerExpand(parser, onDefault);
-  const XML_Status status = XML_Parse(parser, xhtml, static_cast<int>(length), 1);
-  XML_ParserFree(parser);
 
-  if (status == XML_STATUS_ERROR) return {};
-  return std::move(state.anchors);
+  parser_ = parser;
+  state_ = state;
+}
+
+Scanner::~Scanner() {
+  if (parser_) XML_ParserFree(static_cast<XML_Parser>(parser_));
+  delete static_cast<State*>(state_);
+}
+
+bool Scanner::feed(const char* chunk, const size_t length, const bool isFinal) {
+  if (!parser_ || failed_) return false;
+  const XML_Status status =
+      XML_Parse(static_cast<XML_Parser>(parser_), chunk, static_cast<int>(length), isFinal ? 1 : 0);
+  if (status == XML_STATUS_ERROR) {
+    failed_ = true;
+    return false;
+  }
+  return true;
+}
+
+std::vector<VerseAnchor> Scanner::take() {
+  if (!state_ || failed_) return {};
+  return std::move(static_cast<State*>(state_)->anchors);
+}
+
+std::vector<VerseAnchor> scan(const char* xhtml, const size_t length) {
+  Scanner scanner;
+  if (!scanner.valid()) return {};
+  if (!scanner.feed(xhtml, length, /*isFinal=*/true)) return {};
+  return scanner.take();
 }
 
 const VerseAnchor* find(const std::vector<VerseAnchor>& anchors, const uint32_t offset) {

@@ -27,6 +27,29 @@ struct VerseAnchor {
 // later highlights to a stale anchor with no way for the caller to notice.
 std::vector<VerseAnchor> scan(const char* xhtml, size_t length);
 
+// Chunk-fed form, so a caller can stream a spine item instead of holding it
+// whole. Deliberately takes bytes rather than a file handle: HalStorage is
+// firmware-only and this must stay host-testable.
+class Scanner {
+ public:
+  Scanner();
+  ~Scanner();
+  Scanner(const Scanner&) = delete;
+  Scanner& operator=(const Scanner&) = delete;
+
+  bool valid() const { return parser_ != nullptr; }
+  // Returns false once the document is malformed; the caller should stop and
+  // discard. `isFinal` marks the last chunk.
+  bool feed(const char* chunk, size_t length, bool isFinal);
+  // Anchors collected so far. Empty after a failed feed.
+  std::vector<VerseAnchor> take();
+
+ private:
+  void* parser_ = nullptr;   // XML_Parser; opaque here to keep expat out of the header
+  void* state_ = nullptr;    // State
+  bool failed_ = false;
+};
+
 // The anchor covering `offset` -- the greatest one at or below it -- or nullptr.
 const VerseAnchor* find(const std::vector<VerseAnchor>& anchors, uint32_t offset);
 
