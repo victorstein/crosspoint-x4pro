@@ -362,7 +362,7 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
   const int16_t totalHeight = static_cast<int16_t>(topSpacing + ruleThickness + bottomSpacing);
 
   if (!currentPage->elements.empty() && currentPageNextY + totalHeight > viewportHeight) {
-    setCurrentPageVisibleOffset(visibleTextOffset);
+    setCurrentPageVisibleOffset(visibleCounter_.offset);
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
     completedPageCount++;
     currentPage.reset(new (std::nothrow) Page());
@@ -383,7 +383,7 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
     return;
   }
   currentPage->elements.push_back(pageRule);
-  setCurrentPageVisibleOffset(visibleTextOffset);
+  setCurrentPageVisibleOffset(visibleCounter_.offset);
   currentPageNextY = static_cast<int16_t>(currentPageNextY + ruleThickness + bottomSpacing);
 
   if (!pendingAnchorId.empty()) {
@@ -394,15 +394,10 @@ void ChapterHtmlSlimParser::emitHorizontalRule(const BlockStyle& blockStyle) {
 
 void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
-  if (strcasecmp(name, "body") == 0) {
-    // Case-insensitive to match ParagraphStreamer's tag matching (ProgressMapper). A case
-    // mismatch here would leave visibleTextOffset at 0 for the whole section, so every page
-    // would record offset 0 while the sync resolver still counts a non-zero offset.
-    self->insideBody = true;
-  }
-  if (self->insideBody && (self->nonVisibleTextDepth > 0 || isNonVisibleTextTag(name))) {
-    self->nonVisibleTextDepth++;
-  }
+  // Case-insensitivity on <body> matches ParagraphStreamer's tag matching
+  // (ProgressMapper): a mismatch would leave the offset at 0 for the whole
+  // section while the sync resolver still counts a non-zero one.
+  self->visibleCounter_.onStartElement(name);
 
   // Middle of skip
   if (self->skipUntilDepth < self->depth) {
@@ -825,7 +820,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                   return;
                 }
                 self->currentPage->elements.push_back(pageImage);
-                self->setCurrentPageVisibleOffset(self->visibleTextOffset);
+                self->setCurrentPageVisibleOffset(self->visibleCounter_.offset);
                 self->currentPageNextY += displayHeight + imageMarginBottom;
 
                 // The image consumed the empty block's accumulated vertical spacing.
@@ -1031,7 +1026,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
       self->updateEffectiveInlineStyle();
 
       if (strcmp(name, "li") == 0) {
-        self->currentTextBlock->addWord("\xe2\x80\xa2", EpdFontFamily::REGULAR, false, false, self->visibleTextOffset);
+        self->currentTextBlock->addWord("\xe2\x80\xa2", EpdFontFamily::REGULAR, false, false, self->visibleCounter_.offset);
         self->listItemBulletOnly = true;
       }
     }
@@ -1146,16 +1141,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
 
 void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char* s, const int len) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
-  const bool countVisibleOffsets = self->insideBody && self->nonVisibleTextDepth == 0 && !self->syntheticCharacterData;
-  const uint32_t callbackVisibleOffset = self->visibleTextOffset;
-  if (countVisibleOffsets) {
-    const unsigned char* ptr = reinterpret_cast<const unsigned char*>(s);
-    const unsigned char* end = ptr + len;
-    while (ptr < end) {
-      utf8NextCodepoint(&ptr);
-      self->visibleTextOffset++;
-    }
-  }
+  // Synthetic text (table-cell prefixes, image alt fallback) is injected by this
+  // parser and must not advance the reading position. Evaluated before the
+  // count, and still needed below: the per-word walk reuses it to decide which
+  // bytes advance nextCodepointOffset.
+  const bool countVisibleOffsets = self->visibleCounter_.counting() && !self->syntheticCharacterData;
+  const uint32_t callbackVisibleOffset = self->visibleCounter_.offset;
+  if (countVisibleOffsets) self->visibleCounter_.onCharacterData(s, len);
 
   // Skip content of nested table
   if (self->tableDepth > 1) {
@@ -1370,9 +1362,7 @@ void XMLCALL ChapterHtmlSlimParser::defaultHandlerExpand(void* userData, const X
 
 void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* name) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
-  if (self->nonVisibleTextDepth > 0) {
-    self->nonVisibleTextDepth--;
-  }
+  self->visibleCounter_.onEndElement(name);
 
   // Ruby text: </rt> distributes ruby to base words, </ruby> resets ruby state
   if (strcmp(name, "rt") == 0) {
@@ -1539,9 +1529,6 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
       self->listItemBulletOnly = false;
     }
   }
-  if (strcmp(name, "body") == 0) {
-    self->insideBody = false;
-  }
 }
 
 ChapterHtmlSlimParser::~ChapterHtmlSlimParser() { abortParse(); }
@@ -1644,7 +1631,7 @@ bool ChapterHtmlSlimParser::finishParse() {
       anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
       pendingAnchorId.clear();
     }
-    setCurrentPageVisibleOffset(visibleTextOffset);
+    setCurrentPageVisibleOffset(visibleCounter_.offset);
     completePageFn(std::move(currentPage), xpathParagraphIndex, xpathListItemIndex, currentPageVisibleOffset);
     completedPageCount++;
     currentPage.reset();

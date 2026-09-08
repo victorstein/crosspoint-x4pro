@@ -11,6 +11,7 @@
 
 #include "Epub/FootnoteEntry.h"
 #include "Epub/ParsedText.h"
+#include "Epub/VisibleOffsetCounter.h"
 #include "Epub/blocks/ImageBlock.h"
 #include "Epub/blocks/TextBlock.h"
 #include "Epub/css/CssParser.h"
@@ -98,13 +99,13 @@ class ChapterHtmlSlimParser {
   // Canonical reading-position counter: zero-based Unicode codepoints in visible
   // <body> text. Token offsets flow through line breaking so every completed page
   // records the first source character it renders.
-  uint32_t visibleTextOffset = 0;
+  // Owns the <body>/non-visible gate and the codepoint count. Shared verbatim
+  // with VerseAnchors so a second walk cannot drift from this one.
+  VisibleOffsetCounter visibleCounter_;
   uint32_t partWordVisibleOffset = 0;
   uint32_t currentPageVisibleOffset = 0;
   bool currentPageVisibleOffsetSet = false;
-  bool insideBody = false;
   bool syntheticCharacterData = false;
-  uint16_t nonVisibleTextDepth = 0;
 
   // Footnote link tracking
   bool insideFootnoteLink = false;

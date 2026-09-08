@@ -68,3 +68,5 @@ add_subdirectory(path_flatten)
 add_subdirectory(highlight_doc)
 add_subdirectory(highlight_file)
 add_subdirectory(highlight_geometry)
+
+add_subdirectory(visible_offset)
