@@ -111,10 +111,25 @@ The worst-case document already exceeds `SAVE_BYTE_BUDGET` (45,000 bytes), and
 limit and the save-side byte guard is the actual safety mechanism. Adding `ref`
 does not change that contract.
 
-For realistic documents the added cost is the reference plus its JSON key
-overhead — measured against the live file at 21.2 bytes per entry, or about
-8.5KB at the 400-entry ceiling. The live 56-entry file is 7,591 bytes today and
-gains roughly 1.2KB.
+The cost differs between the two migration stages, because splitting *moves*
+bytes out of `text` rather than only adding them. Measured against the live
+56-entry file (7,591 bytes):
+
+| Stage | Size | Delta | Per entry |
+|---|---|---|---|
+| today | 7,591 B | — | — |
+| after Migration A (split only) | 7,871 B | +280 B | +5.0 B |
+| after Migration A + B (steady state) | 8,801 B | +1,210 B | +21.6 B |
+
+Steady state is +8.4KB at the 400-entry ceiling.
+
+**Regression path worth recording:** a document larger than about 36,400 bytes
+today would exceed `SAVE_BYTE_BUDGET` once migrated, at which point *edits* to
+that book's highlights start failing with `STR_HIGHLIGHTS_TOO_LARGE`. Nothing is
+lost — the save guard refuses before touching the file — but the user would be
+unable to add or retag highlights in that book. At 7,591 bytes the live document
+has roughly 5x headroom, so this is a documented ceiling rather than a live
+concern.
 
 ---
 
@@ -124,10 +139,26 @@ gains roughly 1.2KB.
 
 In `HighlightsActivity::rebuildRowItems` (`HighlightsActivity.cpp:77-101`):
 
+```cpp
+item.label    = entry.reference;   // labelText left alone: see below
+item.subtitle = composeSubtitle(passage, tags);
+
+props.subtitleText = screen.theme().smallText;  // MUST come first
+props.subtitleText.maxLines = 3;
 ```
-item.label    = entry.reference                    props.labelText.maxLines = 1
-item.subtitle = passage + "\n" + tags              props.subtitleText.maxLines = 3
-```
+
+**`subtitleText` must be assigned from the theme before `maxLines` is set.**
+`Screen::list` only substitutes the theme font into a style that is still
+*unset* (`FreeInkApp.h:249-251`), and `textStyleUnset` counts `maxLines == 1`
+among the conditions for "unset" (`FreeInkUICore.h:550-554`). Writing
+`props.subtitleText.maxLines = 3` on its own therefore marks the style as
+caller-supplied, the substitution is skipped, and the subtitle renders with
+`font == 0` instead of the theme's `smallText`. The codebase already documents
+this exact trap at `SettingsActivity.cpp:483-487`.
+
+`labelText` is deliberately **not** touched. Its default `maxLines` is already 1,
+and assigning even a no-op value to it would trip the same rule and lose the
+theme's `bodyText`.
 
 The SDK's text layout hard-breaks on `'\n'` (`FreeInkUICore.h:716-717`, handled at
 `:773-776` and `:816-817`), so the embedded newline is a real line break, and
@@ -173,11 +204,22 @@ With `maxLines = 2` a passage wide enough to wrap would consume both subtitle
 lines, and `layoutText` would ellipsise at the end of line two — **silently
 dropping the tags**, which are the whole point of the feature.
 
-With `maxLines = 3` the tags always render. The normal case is unchanged at three
-total lines (label + two subtitle lines is only reached when the passage wraps);
-an unusually wide passage grows that one row to four lines instead of losing
-information. The 72-byte cap makes wrapping unlikely, but "unlikely" is not a
-guarantee and the failure mode is invisible.
+This is measured, not assumed. Running the real `layoutText` against the longest
+migrated passage at the 72-byte cap:
+
+| Orientation | Content width | `maxLines = 2` | `maxLines = 3` |
+|---|---|---|---|
+| landscape | 740px | 2 lines, tags visible | 2 lines, tags visible |
+| portrait | 420px | 2 lines, **tags dropped** | 3 lines, tags visible |
+
+In portrait, at every glyph advance from 8px up, `maxLines = 2` silently loses
+the tags. A 72-character ASCII passage needs three subtitle lines at 420px. So
+`maxLines = 3` is load-bearing, not defensive.
+
+**Consequence to accept:** in portrait a full-length passage produces a
+four-line row (reference + two passage lines + tags). The "exactly three lines"
+target holds in landscape, which is how the device is used for reading; portrait
+trades a taller row for never hiding a tag.
 
 ### Row height arithmetic
 
@@ -213,8 +255,11 @@ Extracted as a pure function so it is host-testable, following the existing
 // src/activities/reader/HighlightRowText.h
 namespace HighlightRowText {
 // Joins a passage and a rendered tag list into one subtitle string.
-// A '\n' is inserted ONLY when both halves are non-empty: a leading newline
-// would render as a blank first line.
+// A '\n' is inserted ONLY when both halves are non-empty. The leading case is
+// the one that matters: layoutText preserves a blank line for a leading '\n'
+// (FreeInkUICore.h:773-776), so an untagged-but-empty-passage row would render
+// an empty first line. A trailing '\n' is harmless, but the symmetric rule is
+// simpler to state and to test.
 std::string composeSubtitle(const std::string& passage, const std::string& tags);
 }
 ```
@@ -295,7 +340,15 @@ Properties that make this safe:
 - **Degrades correctly.** A label with no separator is treated entirely as the
   passage, with no reference — which is precisely the pre-reference behaviour.
 - **First-occurrence split** means a passage that itself contains ` · ` keeps the
-  separator inside the passage rather than corrupting the reference.
+  separator inside the passage rather than corrupting the reference. The
+  collision risk was measured, not assumed: the separator appears **zero** times
+  across all 3,942 files of the Bible EPUB, both as a literal `·` and as
+  `&middot;`/`&#183;`/`&#xB7;`. No pattern guard on the prefix is warranted for
+  this corpus; if a future book proves otherwise, requiring the prefix to end in
+  `<digits>:<digits>` is the cheap fix.
+- **An empty `ref` counts as absent.** A file carrying `"ref": ""` is split
+  exactly as one with no `ref` key at all, so a hand-edited or partially-written
+  file cannot end up with the reference stranded inside `text` forever.
 
 This covers every book, forever, with no manual step.
 
@@ -337,9 +390,12 @@ whitespace runs, strip newlines, trim, truncate to 72 bytes on a UTF-8 boundary
 hardware; re-deriving it from the JW database would add risk for no gain.
 
 **Step 4 — merge, do not replace.** Download the **live** file from the device
-first and back it up. Rewrite only entries matching an existing one on
-`(spineIndex, range.start)`. Any highlight created on the device since the
-migration is left exactly as it is — Migration A handles those.
+first and back it up. Match entries on `(spineIndex, range.start)` and rewrite
+**only the `ref` and `text` fields** of a match. `si`, `start`, `end` and `t` are
+never touched: the offsets are verified-correct on hardware, and `t` may carry
+tag edits the user has made since the migration. An entry with no match — any
+highlight created on the device since — is copied through untouched, and
+Migration A handles its label.
 
 **Step 5 — upload, then verify, then finish.** Upload the merged file,
 re-download it, and diff against what was sent. Nothing is removed or considered
@@ -362,6 +418,7 @@ so `curl` needs `-H "Expect:"`.
 - `ref` is omitted from the JSON when the reference is empty.
 - A legacy entry (`text` with ` · `, no `ref`) splits into reference and passage.
 - A legacy entry **with** `ref` present is not split again — idempotency.
+- An entry with `"ref": ""` and a separator in `text` IS split (empty == absent).
 - A legacy entry with no separator becomes passage-only, reference empty.
 - A passage containing ` · ` splits at the first occurrence only.
 - A reference longer than `MAX_REFERENCE_BYTES` is truncated on a UTF-8 boundary.
@@ -376,6 +433,9 @@ New `test/highlight_row_text/`:
 - `composeSubtitle` joins with `\n` when both halves are present.
 - No leading or trailing `\n` when either half is empty.
 - Both empty yields an empty string.
+- A tag name containing `\n` cannot inject an extra row line (the probe showed
+  it produces a third line), so `composeSubtitle` strips control characters from
+  the tag half.
 
 ### Build
 
@@ -404,5 +464,6 @@ firmware builds.
 |---|---|
 | A future edit sets `labelText.maxLines > 1` on this list and reintroduces the sizing-gate overlap | The reason is recorded in a comment at the call site, not only in this document |
 | Migration B corrupts live highlights | Back up, merge by key rather than replace, verify by re-download before finishing |
+| **Untested:** Migration B builds passages by slicing visible XHTML text, while the device builds them by joining word boxes (`PassageSelectActivity.cpp:233-258`). The two may differ in whitespace or punctuation, which would undercut the consistency this feature exists to deliver | Could not be tested locally: no device-created highlight with a known offset range is available off-device. Step 5 must diff one re-extracted passage against a device-created highlight over the same range **before** the merge is accepted |
 | Reference and passage drift apart, as label and offsets could | They cannot: both are display-only, written together in one place, and neither is used to locate a passage |
 | An older firmware build reads a file containing `ref` | Additive key, no version bump: the reference is ignored and the passage still renders |
