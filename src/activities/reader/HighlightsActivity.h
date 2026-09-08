@@ -107,7 +107,9 @@ class HighlightsActivity final : public UiListActivity {
   std::string computeFilterSubtitle() const;
   std::string tagsSubtitleFor(const HighlightEntry& entry) const;
 
-  void cycleTagFilter();
+  // Pushes TagFilterActivity and applies its pick. Stepping one tag per tap
+  // stopped scaling once the palette cap rose past a handful of tags.
+  void openTagFilter();
   void jumpToHighlight(size_t docIndex);
   void showActionChooser(size_t docIndex);
   void editTags(size_t docIndex);

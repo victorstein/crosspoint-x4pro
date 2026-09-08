@@ -10,6 +10,7 @@
 #include "../../util/HighlightFile.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
+#include "TagFilterActivity.h"
 #include "TagPickerActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -99,21 +100,25 @@ void HighlightsActivity::rebuildRowItems() {
   }
 }
 
-void HighlightsActivity::cycleTagFilter() {
-  const auto& tags = highlightDoc_.tags();
-  if (tags.empty()) return;  // nothing to filter by; stays on "All"
+void HighlightsActivity::openTagFilter() {
+  if (highlightDoc_.tags().empty()) return;  // nothing to filter by; stays on "All"
 
-  if (!filterTagIndex_) {
-    filterTagIndex_ = static_cast<uint16_t>(0);
-  } else if (static_cast<size_t>(*filterTagIndex_ + 1) < tags.size()) {
-    filterTagIndex_ = static_cast<uint16_t>(*filterTagIndex_ + 1);
-  } else {
-    filterTagIndex_.reset();
-  }
-
-  rebuildVisibleIndices();
-  rebuildRowItems();
-  moveSelectionTo(0);
+  app.clearTapFlash();
+  startActivityForResult(std::make_unique<TagFilterActivity>(renderer, mappedInput, highlightDoc_),
+                         [this](const ActivityResult& result) {
+                           // Cancelled leaves the current filter alone, matching the
+                           // Back-from-picker behaviour everywhere else in this screen.
+                           if (result.isCancelled) return;
+                           const auto& selection = std::get<TagSelectionResult>(result.data);
+                           if (selection.tagIndices.empty()) {
+                             filterTagIndex_.reset();
+                           } else if (selection.tagIndices.front() < highlightDoc_.tags().size()) {
+                             filterTagIndex_ = selection.tagIndices.front();
+                           }
+                           rebuildVisibleIndices();
+                           rebuildRowItems();
+                           moveSelectionTo(0);
+                         });
 }
 
 void HighlightsActivity::jumpToHighlight(const size_t docIndex) {
@@ -137,7 +142,7 @@ void HighlightsActivity::activateIndex(const int index) {
   activeNav().selected = index;
 
   if (index == 0) {
-    cycleTagFilter();
+    openTagFilter();
     return;
   }
 
