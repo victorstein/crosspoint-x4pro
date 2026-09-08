@@ -388,17 +388,18 @@ TEST(HighlightDoc, OmitsTheRefKeyWhenTheReferenceIsEmpty) {
   EXPECT_EQ(text.find("\"ref\""), std::string::npos) << text;
 }
 
-TEST(HighlightDoc, TruncatesAnOverlongReferenceOnACodepointBoundary) {
+TEST(HighlightDoc, TruncatesAnOverlongReferenceWithoutSplittingASequence) {
   HighlightDoc doc;
   HighlightEntry e = makeEntry(0, 0, 10);
-  // 30 two-byte codepoints = 60 bytes, past the 48-byte cap. Cutting at 48
-  // would land mid-sequence if the cap were applied blindly.
+  // 1 ASCII + 30 two-byte codepoints = 61 bytes. The leading byte puts every
+  // sequence at an odd offset, so the one spanning bytes 47-48 straddles the
+  // 48-byte cap: a naive resize(48) would leave its lead byte orphaned. An
+  // aligned fixture would pass against that bug, which is why this one is not.
+  e.reference = "x";
   for (int i = 0; i < 30; ++i) e.reference += "\xc3\xa9";
   doc.addHighlight(std::move(e));
 
-  const std::string stored = doc.highlights()[0].reference;
-  EXPECT_EQ(stored.size(), 48u);
-  EXPECT_EQ(static_cast<unsigned char>(stored.back()), 0xa9u) << "cut mid-sequence";
+  EXPECT_EQ(doc.highlights()[0].reference.size(), 47u);
 }
 
 namespace {
@@ -475,4 +476,16 @@ TEST(HighlightDocLegacy, SplittingIsIdempotentAcrossASaveAndReload) {
   ASSERT_TRUE(roundTrip(first, second));
   EXPECT_EQ(second.highlights()[0].reference, "Mateo 11:19");
   EXPECT_EQ(second.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, CapsAReferenceThatIsOverlongAfterTheSplit) {
+  // The split runs before the caps, so a legacy label can yield a reference
+  // longer than MAX_REFERENCE_BYTES. Guards that ordering: capping first would
+  // let the reference escape its bound entirely.
+  HighlightDoc doc;
+  const std::string json = R"({"v":1,"tags":[],"highlights":[{"si":0,"start":0,"end":1,"text":")" +
+                           std::string(60, 'R') + " \xc2\xb7 passage\"}]}";
+  ASSERT_TRUE(parseText(json.c_str(), doc));
+  EXPECT_EQ(doc.highlights()[0].reference.size(), HighlightDoc::MAX_REFERENCE_BYTES);
+  EXPECT_EQ(doc.highlights()[0].label, "passage");
 }

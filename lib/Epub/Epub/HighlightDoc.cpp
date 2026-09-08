@@ -3,7 +3,7 @@
 #include <Utf8.h>
 
 #include <algorithm>
-#include <cstring>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -14,14 +14,14 @@ namespace {
 // shape on the next ordinary save, and re-reading an already-split entry is a
 // no-op. An empty `ref` counts as absent so a partially-written file still
 // recovers.
-constexpr const char* LEGACY_LABEL_SEPARATOR = " \xc2\xb7 ";
+constexpr std::string_view LEGACY_LABEL_SEPARATOR = " \xc2\xb7 ";
 
 void splitLegacyLabel(HighlightEntry& entry) {
   if (!entry.reference.empty()) return;
   const size_t at = entry.label.find(LEGACY_LABEL_SEPARATOR);
   if (at == std::string::npos) return;
   entry.reference = entry.label.substr(0, at);
-  entry.label.erase(0, at + strlen(LEGACY_LABEL_SEPARATOR));
+  entry.label.erase(0, at + LEGACY_LABEL_SEPARATOR.size());
 }
 
 }  // namespace
