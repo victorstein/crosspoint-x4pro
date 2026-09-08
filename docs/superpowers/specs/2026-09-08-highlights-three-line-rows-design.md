@@ -1,7 +1,7 @@
 # Three-line highlight rows: reference, passage, tags
 
 **Date:** 2026-09-08
-**Status:** Design v1
+**Status:** Design v2 — §2 revised after on-device testing (see "Revision: why the newline design was abandoned")
 **Target:** CrossPoint Reader firmware, `x4pro` build target (UC8179 panel, ESP32-S3, 8MB PSRAM)
 **Delivery:** fork-only, continuing `feat/tagged-highlights`
 **Predecessor:** [2026-09-08-selection-and-labels-design.md](2026-09-08-selection-and-labels-design.md)
@@ -29,10 +29,8 @@ and returns those bytes to the passage.
 
 ## Non-goals
 
-- **A fourth line, or a passage that wraps by design.** Considered and rejected:
-  the extra text is not worth halving how many highlights fit on screen. The
-  passage gets exactly one line in the normal case (see "Why `maxLines = 3`" for
-  the one exception, which is a safety valve, not a feature).
+- **A fourth line.** The row is three lines: reference and tags on the first,
+  passage across the next two.
 - **Stripping the leading verse number** from stored passages (`8 "Yo soy…`).
   It is arguably useful and removing it is a separate decision.
 - **Re-resolving the migrated highlights' anchors.** Their spine indices and
@@ -137,150 +135,81 @@ concern.
 
 ### Slot assignment
 
-In `HighlightsActivity::rebuildRowItems` (`HighlightsActivity.cpp:77-101`):
-
-```cpp
-item.label    = entry.reference;   // labelText left alone: see below
-item.subtitle = composeSubtitle(passage, tags);
-
-props.subtitleText = screen.theme().smallText;  // MUST come first
-props.subtitleText.maxLines = 3;
-```
-
-**`subtitleText` must be assigned from the theme before `maxLines` is set.**
-`Screen::list` only substitutes the theme font into a style that is still
-*unset* (`FreeInkApp.h:249-251`), and `textStyleUnset` counts `maxLines == 1`
-among the conditions for "unset" (`FreeInkUICore.h:550-554`). Writing
-`props.subtitleText.maxLines = 3` on its own therefore marks the style as
-caller-supplied, the substitution is skipped, and the subtitle renders with
-`font == 0` instead of the theme's `smallText`. The codebase already documents
-this exact trap at `SettingsActivity.cpp:483-487`.
-
-`labelText` is deliberately **not** touched. Its default `maxLines` is already 1,
-and assigning even a no-op value to it would trip the same rule and lose the
-theme's `bodyText`.
-
-The SDK's text layout hard-breaks on `'\n'` (`FreeInkUICore.h:716-717`, handled at
-`:773-776` and `:816-817`), so the embedded newline is a real line break, and
-`measureWrappedText` is built on the same `layoutText`, so measurement and drawing
-agree exactly (`FreeInkUICore.h:860-873`).
-
-### Why the passage goes in the subtitle, not the label
-
-Putting `"reference\npassage"` in the **label** with `labelText.maxLines = 2`
-looks equivalent and is not. The row-growth pre-pass only measures a wrapped label
-when a *single-line* measurement of the whole string already overflows the
-available width (`list.h:410-416`):
-
-```cpp
-if (labelAvail > 0 &&
-    frame.target().measureText(props.labelText.font, item.label, props.labelText)
-        .width > labelAvail) {
-```
-
-For a short pair — `Juan 3:16` + `Dios amó` — that combined measurement fits, so
-the gate fails, `labelLines` stays 1, and the band is sized for one line
-(`list.h:501`). The draw path then calls `text()` on the same string, which
-goes through `layoutText`, honours the `'\n'` unconditionally, and emits **two**
-lines into a one-line band (`list.h:603-605`) — over the top of the subtitle.
-
-The subtitle branch has no such gate. When `subtitleText.maxLines > 1` it measures
-the wrapped height unconditionally and grows the row by the result
-(`list.h:425-440`):
-
-```cpp
-subH = props.subtitleText.maxLines > 1
-           ? measureWrappedText(frame.target(), item.subtitle,
-                                props.subtitleText, contentAvail).height
-           : subLh;
-```
-
-So the reserved height always matches what is drawn. This arrangement is correct
-by construction rather than correct for the inputs we happen to expect.
-
-### Why `maxLines = 3` and not 2
-
-With `maxLines = 2` a passage wide enough to wrap would consume both subtitle
-lines, and `layoutText` would ellipsise at the end of line two — **silently
-dropping the tags**, which are the whole point of the feature.
-
-This is measured, not assumed. Running the real `layoutText` against the longest
-migrated passage at the 72-byte cap:
-
-| Orientation | Content width | `maxLines = 2` | `maxLines = 3` |
-|---|---|---|---|
-| landscape | 740px | 2 lines, tags visible | 2 lines, tags visible |
-| portrait | 420px | 2 lines, **tags dropped** | 3 lines, tags visible |
-
-In portrait, at every glyph advance from 8px up, `maxLines = 2` silently loses
-the tags. A 72-character ASCII passage needs three subtitle lines at 420px. So
-`maxLines = 3` is load-bearing, not defensive.
-
-**Consequence to accept:** in portrait a full-length passage produces a
-four-line row (reference + two passage lines + tags). The "exactly three lines"
-target holds in landscape, which is how the device is used for reading; portrait
-trades a taller row for never hiding a tag.
-
-### Row height arithmetic
-
-For a three-line row, with `labelLh` the label line height, `subLh` the subtitle
-line height, and `rowH` the theme row height (`FreeInkUI.cpp:114`,
-`lineHeight * 2 + 8`):
+In `HighlightsActivity::rebuildRowItems`:
 
 ```
-labelLines = 1                       (label branch skipped: labelText.maxLines == 1)
-subH       = 2 * subLh               (passage line + tags line)
-basePad    = rowH - labelLh - subLh
-needed     = labelLh + subH + basePad
-           = rowH + subLh
+item.label    = reference          (label line)
+item.value    = tags               (right-aligned, same line)
+item.subtitle = passage            props.subtitleText.maxLines = 2
 ```
 
-The row grows by exactly one subtitle line (`list.h:437-440`). No SDK change is
-required, and `freeink-sdk` — an upstream submodule — is not touched.
+Three lines: reference and tags share the first, the passage wraps across the
+next two. **No embedded newline anywhere** — see the revision note below for why
+that matters.
 
-### Viewport
+`props.subtitleText` is assigned from the theme *before* `maxLines` is set.
+`Screen::list` only substitutes the theme font into a style still considered
+unset (`FreeInkApp.h:249-251`), and `textStyleUnset` counts `maxLines == 1` among
+its conditions (`FreeInkUICore.h:550-554`), so setting `maxLines` alone skips the
+substitution and the subtitle renders with `font == 0`. The same trap is
+documented at `SettingsActivity.cpp:483-487`. `labelText` is left untouched for
+the same reason: its default `maxLines` is already 1.
 
-Variable row heights are already handled. `UiListActivity::render` re-runs the
-build while `consumeRebuildNeeded()` is set, bounded at 8 passes
-(`UiListActivity.cpp:160`), and paging uses the rows actually drawn rather
-than the fixed-height estimate (`UiListActivity.cpp:113-119`). This design adds no
-new machinery there.
+### The tag value is capped
+
+`list()` subtracts the value slot's measured width from the label's
+(`list.h:578-584`). An unbounded tag list therefore drives the reference's
+available width negative, `rect.empty()` becomes true, and `layoutText` returns
+without drawing the reference at all. The joined tag string is capped at
+`MAX_TAG_NAME_BYTES`, which keeps one maximum-length tag whole.
 
 ### Composition rules
 
-Extracted as a pure function so it is host-testable, following the existing
-`TagRowMapping.h` precedent:
+| `reference` | `label` (passage) | tags | label | value | subtitle |
+|---|---|---|---|---|---|
+| set | set | set | reference | tags | passage |
+| set | set | — | reference | — | passage |
+| set | — | set | reference | tags | *(null)* |
+| — | set | set | passage | tags | *(null)* |
+| — | — | set | `tr(STR_UNNAMED)` | tags | *(null)* |
 
-```cpp
-// src/activities/reader/HighlightRowText.h
-namespace HighlightRowText {
-// Joins a passage and a rendered tag list into one subtitle string.
-// A '\n' is inserted ONLY when both halves are non-empty. The leading case is
-// the one that matters: layoutText preserves a blank line for a leading '\n'
-// (FreeInkUICore.h:773-776), so an untagged-but-empty-passage row would render
-// an empty first line. A trailing '\n' is harmless, but the symmetric rule is
-// simpler to state and to test.
-std::string composeSubtitle(const std::string& passage, const std::string& tags);
-}
-```
+`item.subtitle` is left **null**, not pointed at an empty string: `list()` tests
+the pointer rather than the string, so an empty one still reserves a blank line.
 
-| `reference` | `label` (passage) | tags | label slot | subtitle slot |
-|---|---|---|---|---|
-| set | set | set | reference | `passage\ntags` |
-| set | set | — | reference | `passage` |
-| set | — | set | reference | `tags` |
-| set | — | — | reference | *(empty)* |
-| — | set | set | passage | `tags` |
-| — | set | — | passage | *(empty)* |
-| — | — | set | `tr(STR_UNNAMED)` | `tags` |
-| — | — | — | `tr(STR_UNNAMED)` | *(empty)* |
+The `reference`-absent rows reproduce the previous two-line behaviour, which is
+what a non-Bible book with no verse anchors produces.
 
-The `reference`-absent rows reproduce today's two-line behaviour exactly, which is
-what a non-Bible book with no verse anchors will produce.
+---
 
-`rowSubtitles_` (`HighlightsActivity.h:134`) already owns one `std::string` per
-row to keep the `const char*` in `ListItem` valid; it now holds the composed
-string instead of the tag list. No new allocation per row.
+## Revision: why the newline design was abandoned
+
+Design v1 put `passage + "\n" + tags` in the subtitle with `maxLines = 3`,
+on the basis that the SDK's `layoutText` hard-breaks on `'\n'`
+(`FreeInkUICore.h:716-717`). That was verified against `layoutText` directly and
+**it was the wrong thing to verify.** On hardware the tags rendered welded to the
+end of the passage — `"...Sin embargo, laesperanza"`.
+
+Two independent reasons, both in the draw path:
+
+1. **`GfxRenderer::wrappedText` splits on `' '` only** (`GfxRenderer.cpp:1792`).
+   `GfxRendererTarget::text` draws through it, not through `layoutText`
+   (`FreeInkUIGfxRenderer.h:183`), so `'\n'` was never a break. Measurement went
+   through `measureWrappedText` → `layoutText`, which *does* break on it, so
+   every row reserved a line the draw never produced.
+2. **`GfxRendererTarget::text` has a fast path** (`FreeInkUIGfxRenderer.h:172`)
+   that draws any string measuring narrower than the row on a single line
+   without consulting `wrappedText` at all. A `'\n'` has no glyph and so adds no
+   width. Fixing (1) alone would still have failed in landscape, where a 72-byte
+   passage plus a tag fits one line. That file is in the `freeink-sdk` submodule.
+
+The lesson worth keeping: the earlier verification built a *fake* `DrawTarget` to
+exercise `layoutText`. That proved the SDK's reference implementation behaves as
+documented; it proved nothing about the renderer this firmware actually uses.
+Any future claim about text layout must go through `GfxRendererTarget`.
+
+Moving the tags to the value slot removes the dependency entirely — measurement
+and drawing now take the same path — and gives the passage two lines instead of
+one, which was the point of the feature.
 
 ---
 
@@ -428,14 +357,15 @@ so `curl` needs `-H "Expect:"`.
 - The `maxBytes` overload truncates at the requested cap and still respects UTF-8
   boundaries; the default remains 72 for every existing caller.
 
-New `test/highlight_row_text/`:
+There is no host suite for the row composition. `HighlightsActivity` cannot be
+built off-device, and after the revision above the composition is three field
+assignments with no rule worth extracting — the tag cap reuses the already-tested
+`utf8SafeSummary`. The `test/highlight_row_text/` suite that existed for
+`composeSubtitle` was removed with it.
 
-- `composeSubtitle` joins with `\n` when both halves are present.
-- No leading or trailing `\n` when either half is empty.
-- Both empty yields an empty string.
-- A tag name containing `\n` cannot inject an extra row line (the probe showed
-  it produces a third line), so `composeSubtitle` strips control characters from
-  the tag half.
+The slot behaviour that a test *cannot* reach is covered by the on-device checks
+below, which is the honest place for it: every attempt to verify this layer off
+the device so far has verified the wrong thing.
 
 ### Build
 
@@ -450,7 +380,10 @@ firmware builds.
 2. Their passages are visibly longer than before Migration B.
 3. A newly created highlight renders identically to a migrated one — the
    consistency this feature exists to deliver.
-4. A highlight with no tags renders as two lines, with no blank line.
+4. A highlight with no tags renders without an empty value slot, and one with
+   no passage renders without a blank second line.
+5. A highlight carrying several long tags still shows its reference — the value
+   slot must not consume the whole label width.
 5. Filtering by tag, editing tags, and deleting a highlight still work, and rows
    re-render at the correct height afterwards.
 6. Scrolling past the first page and returning does not skip rows — the

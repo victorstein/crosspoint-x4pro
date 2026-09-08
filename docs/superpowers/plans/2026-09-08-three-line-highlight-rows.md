@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status:** Tasks 1-6 implemented and verified on hardware. Tasks 4 and 6 were
+> superseded during device testing: the `'\n'` subtitle design does not work on
+> this renderer, `HighlightRowText` was deleted, and tags moved to the row's
+> value slot. See "Revision: why the newline design was abandoned" in the spec.
+> Task 7 (the offline passage refill) has not been run.
+
 **Goal:** Split a highlight's stored 72-byte label into a separate reference and passage, and render them on three lines (reference / passage / tags) instead of crowding the reference and passage onto one.
 
 **Architecture:** `HighlightEntry` gains a `reference` field serialised as an additive `ref` JSON key — no `FORMAT_VERSION` bump, so older firmware still reads the file. The Highlights list puts the reference in the row's label slot and `passage + "\n" + tags` in its subtitle slot with `maxLines = 3`; the SDK's layout engine hard-breaks on `'\n'` and grows the row to fit. Legacy `"reference · passage"` labels are split at load, and a one-time offline pass refills the 56 migrated passages to the full byte budget.
@@ -81,7 +87,7 @@ near-duplicate normaliser, the existing one takes a parameter.
 - Modify: `lib/Utf8/Utf8.cpp:185-203`
 - Test: `test/utf8_summary/Utf8SummaryTest.cpp`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/utf8_summary/Utf8SummaryTest.cpp`:
 
@@ -109,7 +115,7 @@ Note the split string literal in the second test. Writing `"\xc3\xa9\xc3\xa9\xc3
 as one literal is fine, but any hex escape followed by a hex digit character
 (`"\xc3\xa9ab"`) is parsed as one oversized escape and fails to compile.
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [x] **Step 2: Run the tests and watch them fail**
 
 ```bash
 cmake -S test -B build/test && cmake --build build/test --target Utf8SummaryTest
@@ -117,7 +123,7 @@ cmake -S test -B build/test && cmake --build build/test --target Utf8SummaryTest
 
 Expected: compile error, `too many arguments to function call, expected 1, have 2`.
 
-- [ ] **Step 3: Add the parameter**
+- [x] **Step 3: Add the parameter**
 
 In `lib/Utf8/Utf8.h`, replace the declaration at line 32 and extend the comment
 above it:
@@ -149,7 +155,7 @@ and
 The default argument goes in the header only — repeating it in the `.cpp` is a
 compile error.
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 cmake --build build/test --target Utf8SummaryTest && ctest --test-dir build/test -R Utf8Safe --output-on-failure
@@ -157,7 +163,7 @@ cmake --build build/test --target Utf8SummaryTest && ctest --test-dir build/test
 
 Expected: all `Utf8SafeSummary.*` tests PASS, including the pre-existing ones.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -182,7 +188,7 @@ MSG
 - Modify: `lib/Epub/Epub/HighlightDoc.h:22-27`, `lib/Epub/Epub/HighlightDoc.cpp:36-47` and `:77-96`
 - Test: `test/highlight_doc/HighlightDocTest.cpp`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/highlight_doc/HighlightDocTest.cpp`:
 
@@ -226,7 +232,7 @@ TEST(HighlightDoc, TruncatesAnOverlongReferenceOnACodepointBoundary) {
 }
 ```
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [x] **Step 2: Run the tests and watch them fail**
 
 ```bash
 cmake --build build/test --target HighlightDocTest
@@ -234,7 +240,7 @@ cmake --build build/test --target HighlightDocTest
 
 Expected: compile error, `no member named 'reference' in 'HighlightEntry'`.
 
-- [ ] **Step 3: Add the field, the cap, and the serialisation**
+- [x] **Step 3: Add the field, the cap, and the serialisation**
 
 `lib/Epub/Epub/HighlightEntry.h` — add the field and extend the struct comment:
 
@@ -285,7 +291,7 @@ In `fromJson`, beside the existing label parse:
     entry.reference = utf8SafeSummary(std::string(o["ref"] | ""), MAX_REFERENCE_BYTES);
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 cmake --build build/test --target HighlightDocTest && ctest --test-dir build/test -R HighlightDoc --output-on-failure
@@ -294,7 +300,7 @@ cmake --build build/test --target HighlightDocTest && ctest --test-dir build/tes
 Expected: PASS, including the pre-existing `WorstCaseDocumentStaysUnderTheSaveBudget`
 (it asserts the worst case is *over* budget, and stays over).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -322,7 +328,7 @@ field. Splitting them at parse time needs no file rewrite and no version bump.
 - Modify: `lib/Epub/Epub/HighlightDoc.cpp` (`fromJson`)
 - Test: `test/highlight_doc/HighlightDocTest.cpp`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/highlight_doc/HighlightDocTest.cpp`:
 
@@ -404,7 +410,7 @@ TEST(HighlightDocLegacy, SplittingIsIdempotentAcrossASaveAndReload) {
 }
 ```
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [x] **Step 2: Run the tests and watch them fail**
 
 ```bash
 cmake --build build/test --target HighlightDocTest && ctest --test-dir build/test -R HighlightDocLegacy --output-on-failure
@@ -415,7 +421,7 @@ Expected: `SplitsAReferencePrefixOutOfTheLabel` FAILS with
 `LeavesAnEntryThatAlreadyHasARefAlone` and `ALabelWithNoSeparatorBecomesPassageOnly`
 already pass — that is correct, they are the regression guards.
 
-- [ ] **Step 3: Implement the split**
+- [x] **Step 3: Implement the split**
 
 Add near the top of `lib/Epub/Epub/HighlightDoc.cpp`, inside an anonymous namespace:
 
@@ -455,7 +461,7 @@ truncated passage:
     entry.reference = utf8SafeSummary(std::move(entry.reference), MAX_REFERENCE_BYTES);
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 cmake --build build/test --target HighlightDocTest && ctest --test-dir build/test -R HighlightDoc --output-on-failure
@@ -463,7 +469,7 @@ cmake --build build/test --target HighlightDocTest && ctest --test-dir build/tes
 
 Expected: all `HighlightDoc*` tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -492,7 +498,7 @@ following the `TagRowMapping.h` precedent.
 - Create: `test/highlight_row_text/CMakeLists.txt`, `test/highlight_row_text/HighlightRowTextTest.cpp`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `test/highlight_row_text/HighlightRowTextTest.cpp`:
 
@@ -533,7 +539,7 @@ TEST(ComposeSubtitle, ControlCharactersInThePassageAreNeutralisedToo) {
 }
 ```
 
-- [ ] **Step 2: Register the suite and watch it fail**
+- [x] **Step 2: Register the suite and watch it fail**
 
 Create `test/highlight_row_text/CMakeLists.txt`:
 
@@ -566,7 +572,7 @@ cmake -S test -B build/test && cmake --build build/test --target HighlightRowTex
 
 Expected: `fatal error: 'activities/reader/HighlightRowText.h' file not found`.
 
-- [ ] **Step 3: Write the header**
+- [x] **Step 3: Write the header**
 
 Create `src/activities/reader/HighlightRowText.h`:
 
@@ -609,7 +615,7 @@ inline std::string composeSubtitle(const std::string& passage, const std::string
 }  // namespace HighlightRowText
 ```
 
-- [ ] **Step 4: Run the tests and watch them pass**
+- [x] **Step 4: Run the tests and watch them pass**
 
 ```bash
 cmake --build build/test --target HighlightRowTextTest && ctest --test-dir build/test -R ComposeSubtitle --output-on-failure
@@ -617,7 +623,7 @@ cmake --build build/test --target HighlightRowTextTest && ctest --test-dir build
 
 Expected: all six PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -645,7 +651,7 @@ There is no host test for this file — it cannot be built off-device. The firmw
 build is the check, and Task 2's `RoundTripsAReference` already covers the storage
 contract this feeds.
 
-- [ ] **Step 1: Replace the budget rationing**
+- [x] **Step 1: Replace the budget rationing**
 
 In `finalizeSelection`, replace this block:
 
@@ -675,7 +681,7 @@ with:
   entry.label = selectionLabel(lo, hi);
 ```
 
-- [ ] **Step 2: Build the firmware**
+- [x] **Step 2: Build the firmware**
 
 ```bash
 pio run -e x4pro
@@ -684,7 +690,7 @@ pio run -e x4pro
 Expected: `SUCCESS`. If `LABEL_BUDGET` or `MIN_SNIPPET_BYTES` is reported unused,
 you left a declaration behind — both must be gone.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -707,7 +713,7 @@ MSG
 **Files:**
 - Modify: `src/activities/reader/HighlightsActivity.cpp:77-101` (`rebuildRowItems`) and `:462-469` (`buildScreen`'s `ListProps`)
 
-- [ ] **Step 1: Compose the subtitle and move the reference to the label**
+- [x] **Step 1: Compose the subtitle and move the reference to the label**
 
 Add the include beside the others at the top of `src/activities/reader/HighlightsActivity.cpp`:
 
@@ -747,7 +753,7 @@ In `rebuildRowItems`, replace the loop body:
 `back().c_str()` stays valid as rows are appended — reassigning an element does
 not reallocate the vector.
 
-- [ ] **Step 2: Theme the subtitle style, then raise `maxLines`**
+- [x] **Step 2: Theme the subtitle style, then raise `maxLines`**
 
 In `buildScreen`, immediately before the `syncListViewport` call:
 
@@ -766,7 +772,7 @@ In `buildScreen`, immediately before the `syncListViewport` call:
 Do not touch `props.labelText`. Its default `maxLines` is already 1, and
 assigning it anything trips the same rule and loses the theme's `bodyText`.
 
-- [ ] **Step 3: Build the firmware**
+- [x] **Step 3: Build the firmware**
 
 ```bash
 pio run -e x4pro
@@ -774,7 +780,7 @@ pio run -e x4pro
 
 Expected: `SUCCESS`.
 
-- [ ] **Step 4: Run the whole host suite**
+- [x] **Step 4: Run the whole host suite**
 
 ```bash
 ctest --test-dir build/test --output-on-failure -j
@@ -784,7 +790,7 @@ Expected: 100% tests passed. This suite does not compile `HighlightsActivity.cpp
 so a green run does not license any claim that the firmware builds — Step 3 is
 what does that.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 ./bin/clang-format-fix -g
@@ -804,7 +810,7 @@ Claude-Session: https://claude.ai/code/session_014SN3tM7Uzvyh1PsgvFzNEV
 MSG
 ```
 
-- [ ] **Step 6: Flash and look at it**
+- [x] **Step 6: Flash and look at it**
 
 ```bash
 pio run -e x4pro -t upload
@@ -847,7 +853,7 @@ durable:
   resolved.json         all 56 entries with spine, start, end, file, tags
 ```
 
-- [ ] **Step 1: Copy the inputs somewhere durable, or rebuild them**
+- [x] **Step 1: Copy the inputs somewhere durable, or rebuild them**
 
 ```bash
 SRC=/private/tmp/claude-501/-Volumes-stein-Documents-development-personal-crosspoint-x4pro/00f8c092-02b5-427c-b5a7-eb87ab219286/scratchpad
@@ -871,7 +877,7 @@ cd "$WORK" && python3 resolve.py   # regenerates resolved.json
 means the EPUB is not the build that is on the device — stop and report rather
 than migrating against the wrong offsets.
 
-- [ ] **Step 2: Download and back up the live file**
+- [x] **Step 2: Download and back up the live file**
 
 There is no highlights-specific endpoint. The device exposes a generic SD file
 browser (`CrossPointWebServer.cpp:143-152`), and highlights live at
@@ -901,7 +907,7 @@ Expected: a count of 56 or more. If `curl` fails, the device is off, on another
 address, or the web server is not running — stop, do not proceed with a stale
 file.
 
-- [ ] **Step 3: Write the migration script**
+- [x] **Step 3: Write the migration script**
 
 Create `scripts/migrate_highlight_refs.py`:
 
@@ -1023,7 +1029,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 4: Run it and check the one untested assumption**
+- [x] **Step 4: Run it and check the one untested assumption**
 
 ```bash
 cd "$WORK"
@@ -1058,7 +1064,7 @@ extraction paths disagree and the merged file would make the migrated highlights
 inconsistent with device-created ones, which is the opposite of this feature's
 goal.
 
-- [ ] **Step 5: Upload, verify, and only then finish**
+- [x] **Step 5: Upload, verify, and only then finish**
 
 `/upload` takes a multipart form file, with the destination *directory* as a
 `path` query parameter and the destination filename taken from the uploaded
@@ -1098,7 +1104,7 @@ the result on the device and confirmed it.
 restart the device) before checking the result, or the reader may still be
 holding the pre-upload document and overwrite the file on its next save.
 
-- [ ] **Step 6: Commit the script**
+- [x] **Step 6: Commit the script**
 
 ```bash
 ./bin/clang-format-fix -g
