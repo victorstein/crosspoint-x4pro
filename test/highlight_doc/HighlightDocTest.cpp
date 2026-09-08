@@ -362,3 +362,41 @@ TEST(HighlightDocSetTags, SurvivesARoundTrip) {
   ASSERT_EQ(parsed.highlights()[0].tagIndices.size(), 1u);
   EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "beta");
 }
+
+TEST(HighlightDoc, RoundTripsAReference) {
+  HighlightDoc doc;
+  HighlightEntry e = makeEntry(3, 100, 200);
+  e.reference = "Apocalipsis 1:8";
+  e.label = "8 Yo soy el Alfa";
+  doc.addHighlight(std::move(e));
+
+  HighlightDoc parsed;
+  ASSERT_TRUE(roundTrip(doc, parsed));
+  ASSERT_EQ(parsed.highlights().size(), 1u);
+  EXPECT_EQ(parsed.highlights()[0].reference, "Apocalipsis 1:8");
+  EXPECT_EQ(parsed.highlights()[0].label, "8 Yo soy el Alfa");
+}
+
+TEST(HighlightDoc, OmitsTheRefKeyWhenTheReferenceIsEmpty) {
+  HighlightDoc doc;
+  doc.addHighlight(makeEntry(0, 0, 10));
+
+  JsonDocument json;
+  doc.toJson(json);
+  std::string text;
+  serializeJson(json, text);
+  EXPECT_EQ(text.find("\"ref\""), std::string::npos) << text;
+}
+
+TEST(HighlightDoc, TruncatesAnOverlongReferenceOnACodepointBoundary) {
+  HighlightDoc doc;
+  HighlightEntry e = makeEntry(0, 0, 10);
+  // 30 two-byte codepoints = 60 bytes, past the 48-byte cap. Cutting at 48
+  // would land mid-sequence if the cap were applied blindly.
+  for (int i = 0; i < 30; ++i) e.reference += "\xc3\xa9";
+  doc.addHighlight(std::move(e));
+
+  const std::string stored = doc.highlights()[0].reference;
+  EXPECT_EQ(stored.size(), 48u);
+  EXPECT_EQ(static_cast<unsigned char>(stored.back()), 0xa9u) << "cut mid-sequence";
+}

@@ -40,6 +40,7 @@ bool HighlightDoc::addHighlight(HighlightEntry entry) {
     entry.tagIndices.resize(MAX_TAGS_PER_HIGHLIGHT);
   }
   entry.label = utf8SafeSummary(std::move(entry.label));
+  entry.reference = utf8SafeSummary(std::move(entry.reference), MAX_REFERENCE_BYTES);
 
   highlights_.push_back(std::move(entry));
   return true;
@@ -91,6 +92,7 @@ void HighlightDoc::toJson(JsonDocument& doc) const {
       JsonArray t = o["t"].to<JsonArray>();
       for (const uint16_t idx : h.tagIndices) t.add(idx);
     }
+    if (!h.reference.empty()) o["ref"] = h.reference;
     o["text"] = h.label;
   }
 }
@@ -132,6 +134,7 @@ bool HighlightDoc::fromJson(JsonVariantConst doc) {
     }
 
     entry.label = utf8SafeSummary(std::string(o["text"] | ""));
+    entry.reference = utf8SafeSummary(std::string(o["ref"] | ""), MAX_REFERENCE_BYTES);
 
     highlights.push_back(std::move(entry));
   }
