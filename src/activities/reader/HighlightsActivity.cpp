@@ -2,13 +2,13 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Utf8.h>
 
 #include <algorithm>
 #include <utility>
 #include <variant>
 
 #include "../../util/HighlightFile.h"
-#include "HighlightRowText.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "TagFilterActivity.h"
@@ -63,22 +63,25 @@ std::string HighlightsActivity::computeFilterSubtitle() const {
   return tags[*filterTagIndex_];
 }
 
-std::string HighlightsActivity::tagsSubtitleFor(const HighlightEntry& entry) const {
+std::string HighlightsActivity::tagsValueFor(const HighlightEntry& entry) const {
   if (entry.tagIndices.empty()) return std::string();
   const auto& tags = highlightDoc_.tags();
-  std::string subtitle;
+  std::string value;
   for (const uint16_t idx : entry.tagIndices) {
     if (idx >= tags.size()) continue;  // defensive; should not happen
-    if (!subtitle.empty()) subtitle += ", ";
-    subtitle += tags[idx];
+    if (!value.empty()) value += ", ";
+    value += tags[idx];
   }
-  return subtitle;
+  // list() takes the value slot's measured width out of the label's, so an
+  // unbounded tag list drives the reference's width negative and list() then
+  // skips drawing it. Matching MAX_TAG_NAME_BYTES keeps one longest tag whole.
+  return utf8SafeSummary(std::move(value), HighlightDoc::MAX_TAG_NAME_BYTES);
 }
 
 void HighlightsActivity::rebuildRowItems() {
-  rowSubtitles_.clear();
+  rowTagValues_.clear();
   rowItems_.clear();
-  rowSubtitles_.reserve(visibleIndices_.size());
+  rowTagValues_.reserve(visibleIndices_.size());
   rowItems_.reserve(visibleIndices_.size() + 1);
 
   filterSubtitle_ = computeFilterSubtitle();
@@ -91,23 +94,24 @@ void HighlightsActivity::rebuildRowItems() {
   const auto& highlights = highlightDoc_.highlights();
   for (size_t i = 0; i < visibleIndices_.size(); ++i) {
     const auto& entry = highlights[visibleIndices_[i]];
-    const std::string tags = tagsSubtitleFor(entry);
+    rowTagValues_.push_back(tagsValueFor(entry));
 
+    // Reference and tags share the first line, passage wraps beneath. Nothing
+    // relies on an embedded newline: GfxRenderer::wrappedText splits on spaces
+    // only, and text() draws a string narrower than the row on a single line
+    // regardless, so a '\n' here would measure as a break and never draw as one.
     fui::ListItem item{};
-    // Reference on its own line, passage and tags in the subtitle beneath it.
-    // Without a reference (a book with no verse anchors) the passage takes the
-    // label slot, which is exactly the two-line layout this replaced.
     if (!entry.reference.empty()) {
       item.label = entry.reference.c_str();
-      rowSubtitles_.push_back(HighlightRowText::composeSubtitle(entry.label, tags));
-    } else if (!entry.label.empty()) {
-      item.label = entry.label.c_str();
-      rowSubtitles_.push_back(HighlightRowText::composeSubtitle("", tags));
+      // Left null when there is no passage: list() tests the pointer, not the
+      // string, so an empty one would still reserve a blank second line.
+      if (!entry.label.empty()) item.subtitle = entry.label.c_str();
     } else {
-      item.label = tr(STR_UNNAMED);
-      rowSubtitles_.push_back(HighlightRowText::composeSubtitle("", tags));
+      // No verse anchors in this book: the passage takes the label line, which
+      // is exactly the layout this replaced.
+      item.label = entry.label.empty() ? tr(STR_UNNAMED) : entry.label.c_str();
     }
-    item.subtitle = rowSubtitles_.back().c_str();
+    if (!rowTagValues_.back().empty()) item.value = rowTagValues_.back().c_str();
     item.actionValue = static_cast<int16_t>(i + 1);
     rowItems_.push_back(item);
   }
@@ -483,9 +487,9 @@ void HighlightsActivity::buildScreen(UiScreen& screen) {
   // fails that test. Setting maxLines alone would skip the substitution and
   // render the subtitle in font 0.
   props.subtitleText = screen.theme().smallText;
-  // Three, not two: at two, a passage wide enough to wrap consumes both lines
-  // and the tags are silently ellipsised away. Measured to happen in portrait.
-  props.subtitleText.maxLines = 3;
+  // The passage owns the subtitle band alone, so two lines of it is the whole
+  // budget; tags sit in the value slot on the label line.
+  props.subtitleText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
   screen.list(props);
 }
