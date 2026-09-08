@@ -182,7 +182,7 @@ void utf8TruncateChars(std::string& str, const size_t numChars) {
   }
 }
 
-std::string utf8SafeSummary(std::string passage) {
+std::string utf8SafeSummary(std::string passage, const size_t maxBytes) {
   passage.erase(std::unique(passage.begin(), passage.end(),
                              [](const char a, const char b) {
                                return std::isspace(static_cast<unsigned char>(a)) &&
@@ -197,8 +197,8 @@ std::string utf8SafeSummary(std::string passage) {
                               [](const unsigned char ch) { return !std::isspace(ch); })
                     .base(),
                 passage.end());
-  if (passage.size() > 72) {
-    passage.resize(static_cast<size_t>(utf8SafeTruncateBuffer(passage.data(), 72)));
+  if (passage.size() > maxBytes) {
+    passage.resize(static_cast<size_t>(utf8SafeTruncateBuffer(passage.data(), static_cast<int>(maxBytes))));
   }
   return passage;
 }

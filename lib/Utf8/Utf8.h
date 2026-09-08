@@ -24,12 +24,12 @@ std::string utf8ComposeNfc(const std::string& in);
 int utf8SafeTruncateBuffer(const char* buf, int len);
 
 // Normalises a passage into a display label: collapses runs of whitespace,
-// strips newlines, trims, and caps at 72 bytes WITHOUT splitting a UTF-8
-// sequence. The byte cap matches BookmarkUtil's historical behaviour; the
+// strips newlines, trims, and caps at maxBytes WITHOUT splitting a UTF-8
+// sequence. The 72-byte default matches BookmarkUtil's historical behaviour; the
 // codepoint safety does not — a split sequence renders as a replacement
 // character, and highlighted passages are far likelier to be non-ASCII than a
-// page's first words.
-std::string utf8SafeSummary(std::string passage);
+// page's first words. A highlight's reference passes a smaller cap.
+std::string utf8SafeSummary(std::string passage, size_t maxBytes = 72);
 
 // Returns true for CJK characters that allow line breaks on either side without hyphenation.
 // Covers CJK Unified Ideographs, Hiragana, Katakana, Hangul Syllables, CJK punctuation,
