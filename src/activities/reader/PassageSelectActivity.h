@@ -96,6 +96,11 @@ class PassageSelectActivity final : public Activity {
   // Offsets covered by a selection ending at `endIndex`. The preview and the
   // committed entry both go through this so they cannot disagree.
   VisibleRange selectionRange(int endIndex) const;
+  // Rebuilds the already-saved highlight rects for the current page. Shared by
+  // onEnter and advancePage so a turned-to page draws them the same way.
+  void rebuildCommittedRects();
+  // Forward page turn during selection. False when there is no next page.
+  bool advancePage();
   void drawSelectionOutline();
   void drawHints() const;
 

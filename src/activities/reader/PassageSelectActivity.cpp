@@ -61,14 +61,7 @@ void PassageSelectActivity::onEnter() {
 
   extractWords();
 
-  // Highlights already saved on this page, so the outlined selection-in-progress
-  // reads as visibly different from what's already committed.
-  std::vector<VisibleRange> existingRanges;
-  for (const auto* entry : highlightDoc.findBySpine(spineIndex)) {
-    existingRanges.push_back(entry->range);
-  }
-  committedRects = HighlightOverlay::buildRects(*page, existingRanges, marginLeft, marginTop, columnRight, lineHeight,
-                                                ascender, gapTolerance);
+  rebuildCommittedRects();
 
   if (!words.empty()) {
     const int initial = closestInRow(static_cast<uint16_t>(rowCount / 2), renderer.getScreenWidth() / 2);
@@ -114,6 +107,52 @@ void PassageSelectActivity::extractWords() {
     }
     rowCount++;
   }
+}
+
+void PassageSelectActivity::rebuildCommittedRects() {
+  // Highlights already saved on this page, so the outlined selection-in-progress
+  // reads as visibly different from what's already committed.
+  std::vector<VisibleRange> existingRanges;
+  for (const auto* entry : highlightDoc.findBySpine(spineIndex)) {
+    existingRanges.push_back(entry->range);
+  }
+  committedRects = HighlightOverlay::buildRects(*page, existingRanges, marginLeft, marginTop, columnRight, lineHeight,
+                                                ascender, gapTolerance);
+}
+
+bool PassageSelectActivity::advancePage() {
+  if (phase != Phase::PickingEnd) return false;
+
+  auto next = section.loadPage(currentPageNumber + 1);
+  if (!next) {
+    // loadPage returns null past the build watermark, and the reader's loop --
+    // which normally advances the build -- does not run while this activity is
+    // on top. Without nudging the build here, a swipe mid-chapter would be a
+    // silent, permanent dead end on a still-building section.
+    if (!section.isBuildComplete()) {
+      section.buildSomeMore(1);
+      next = section.loadPage(currentPageNumber + 1);
+    }
+    if (!next) return false;
+  }
+
+  {
+    // The render task reads page/words/committedRects; swapping them unfenced
+    // is the hazard the tag-deletion fix closed in 0c1c884a.
+    RenderLock lock;
+    page = std::move(next);
+    currentPageNumber++;
+    extractWords();
+    rebuildCommittedRects();
+    cursor = 0;
+    // The anchor's page is gone; anchorOffset carries it from here.
+    anchorIndex = -1;
+    // render() takes a differential fast path while this holds, and would
+    // paint the new page's outline over the previous page's pixels.
+    snapshotValid = false;
+  }
+  requestUpdate();
+  return true;
 }
 
 VisibleRange PassageSelectActivity::selectionRange(const int endIndex) const {
@@ -412,6 +451,12 @@ void PassageSelectActivity::loop() {
   }
 
   if (words.empty()) return;
+
+  // Right-to-left swipe advances a page so a passage split by a page break can
+  // be finished. Only while picking the second anchor: turning pages before an
+  // anchor exists has no meaning. Cannot collide with Back, which is an
+  // edge-anchored left-to-right swipe (MappedInputManager.cpp:266-271).
+  if (mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left && advancePage()) return;
 
   // Touch: a touch-down moves the cursor to the touched word (differential
   // repaint), a tap on a word commits it as the current anchor in one go.
