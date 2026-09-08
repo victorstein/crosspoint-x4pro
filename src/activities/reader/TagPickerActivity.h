@@ -50,7 +50,15 @@ class TagPickerActivity final : public UiListActivity {
   void render(RenderLock&&) override;
 
  private:
-  static constexpr int MAX_ROWS = static_cast<int>(HighlightDoc::MAX_TAGS) + 1;  // palette + "New tag..." row
+  // "Done" + palette + "New tag..."
+  static constexpr int MAX_ROWS = static_cast<int>(HighlightDoc::MAX_TAGS) + 2;
+  static constexpr int DONE_ROW = 0;
+
+  // Row index -> index into highlightDoc.tags(), or -1 for a non-tag row.
+  // EVERY row-to-tag conversion goes through this. The rows and the palette are
+  // no longer the same numbering, and applying the offset in one place but not
+  // the next is exactly how a held Confirm on "Done" would reach the delete path.
+  int tagIndexForRow(int row) const;
 
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;

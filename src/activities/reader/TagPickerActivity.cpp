@@ -38,14 +38,20 @@ void TagPickerActivity::onEnter() {
   }
 }
 
-int TagPickerActivity::listCount() const { return static_cast<int>(highlightDoc.tags().size()) + 1; }
+int TagPickerActivity::listCount() const { return static_cast<int>(highlightDoc.tags().size()) + 2; }
+
+int TagPickerActivity::tagIndexForRow(const int row) const {
+  const int tagCount = static_cast<int>(highlightDoc.tags().size());
+  if (row <= DONE_ROW || row > tagCount) return -1;  // "Done", "New tag...", or out of range
+  return row - 1;
+}
 
 const char* TagPickerActivity::headerTitle() const { return tr(STR_TAGS); }
 
 void TagPickerActivity::drawFooter() {
   // Matches StatusBarSettingsActivity's toggle-list footer: most rows here
   // toggle in place rather than navigating anywhere.
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_TOGGLE), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
@@ -64,23 +70,31 @@ void TagPickerActivity::buildScreen(UiScreen& screen) {
   // captured on an earlier visit -- see the rowItems_ comment in the header.
   const auto& tags = highlightDoc.tags();
   const int tagCount = static_cast<int>(tags.size());
+  // actionValue carries the ROW, not the tag: UiListActivity hands it straight
+  // back to activateIndex/onRowLongPress and assigns it to nav.selected, so a
+  // tag index here would desync the viewport from the list.
+  fui::ListItem doneItem{};
+  doneItem.label = tr(STR_DONE);
+  doneItem.actionValue = static_cast<int16_t>(DONE_ROW);
+  rowItems_[DONE_ROW] = doneItem;
+
   for (int i = 0; i < tagCount; ++i) {
     fui::ListItem item{};
     item.label = tags[static_cast<size_t>(i)].c_str();
     item.toggle = true;
     item.toggleChecked = selected_[i];
-    item.actionValue = static_cast<int16_t>(i);
-    rowItems_[i] = item;
+    item.actionValue = static_cast<int16_t>(i + 1);
+    rowItems_[i + 1] = item;
   }
 
   fui::ListItem newTagItem{};
   newTagItem.label = tr(STR_TAG_NEW);
-  newTagItem.actionValue = static_cast<int16_t>(tagCount);
-  rowItems_[tagCount] = newTagItem;
+  newTagItem.actionValue = static_cast<int16_t>(tagCount + 1);
+  rowItems_[tagCount + 1] = newTagItem;
 
   fui::ListProps props;
   props.items = rowItems_;
-  props.count = static_cast<uint16_t>(tagCount + 1);
+  props.count = static_cast<uint16_t>(tagCount + 2);
   props.action = ACTION_ROW;
   // Tap toggles/opens; long-press deletes (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
@@ -88,16 +102,20 @@ void TagPickerActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
-void TagPickerActivity::activateIndex(const int index) {
+void TagPickerActivity::activateIndex(const int row) {
   const int tagCount = static_cast<int>(highlightDoc.tags().size());
-  if (index < 0 || index > tagCount) return;
-  nav.selected = index;
+  if (row < 0 || row > tagCount + 1) return;
+  nav.selected = row;
 
-  if (index == tagCount) {
+  if (row == DONE_ROW) {
+    commitAndFinish();
+    return;
+  }
+  if (row == tagCount + 1) {
     startNewTagFlow();
     return;
   }
-  toggleTag(static_cast<size_t>(index));
+  toggleTag(static_cast<size_t>(tagIndexForRow(row)));
 }
 
 void TagPickerActivity::toggleTag(const size_t index) {
@@ -220,16 +238,15 @@ void TagPickerActivity::commitAndFinish() {
   finish();
 }
 
-void TagPickerActivity::onRowLongPress(const int index) {
+void TagPickerActivity::onRowLongPress(const int row) {
   if (confirmPopup_.isActive()) return;
-  const int tagCount = static_cast<int>(highlightDoc.tags().size());
-  // rowActionTrampoline only bounds-checks against listCount() (tagCount+1),
-  // so onRowLongPress(tagCount) IS delivered for the "New tag..." row --
-  // there is nothing there to delete.
-  if (index < 0 || index >= tagCount) return;
+  // Delivered for every row within listCount(), including "Done" and
+  // "New tag...", neither of which has anything to delete.
+  const int tagIndex = tagIndexForRow(row);
+  if (tagIndex < 0) return;
   app.clearTapFlash();
-  nav.selected = index;
-  showDeleteConfirmation(static_cast<size_t>(index));
+  nav.selected = row;
+  showDeleteConfirmation(static_cast<size_t>(tagIndex));
 }
 
 void TagPickerActivity::showDeleteConfirmation(const size_t tagIndex) {
@@ -316,11 +333,11 @@ bool TagPickerActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     const int selected = nav.selected;
     if (selected < 0 || selected >= listCount()) return true;
-    const int tagCount = static_cast<int>(highlightDoc.tags().size());
-    // Matches HighlightsActivity: a held Confirm release on a tag row (not
-    // the "New tag..." row, which has nothing to delete) opens the delete
-    // confirmation instead of toggling.
-    if (selected < tagCount && mappedInput.getHeldTime() > ENTER_DELETE_MODE_MS) {
+    // Matches HighlightsActivity: a held Confirm release on a TAG row opens the
+    // delete confirmation instead of toggling. Gated on the row->tag conversion,
+    // never on a raw count: comparing a row index against a tag count would put
+    // "Done" inside the delete range and leave the last tag unreachable.
+    if (tagIndexForRow(selected) >= 0 && mappedInput.getHeldTime() > ENTER_DELETE_MODE_MS) {
       onRowLongPress(selected);
     } else {
       activateIndex(selected);
