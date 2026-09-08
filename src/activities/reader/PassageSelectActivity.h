@@ -79,6 +79,10 @@ class PassageSelectActivity final : public Activity {
   void showActionChooser(int endIndex);
   void startTagFlow(int endIndex);
   void finalizeSelection(int endIndex, std::vector<uint16_t> tagIndices = {});
+  // Display label for the selected words. WordBox holds geometry only, so the
+  // token text is re-read from the block arena instead of kept resident for
+  // every word on the page.
+  std::string selectionLabel(int lo, int hi) const;
   void drawSelectionOutline();
   void drawHints() const;
 

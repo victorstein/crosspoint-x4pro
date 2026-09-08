@@ -113,6 +113,32 @@ void PassageSelectActivity::extractWords() {
   }
 }
 
+std::string PassageSelectActivity::selectionLabel(const int lo, const int hi) const {
+  // Same walk order as extractWords(), so `index` matches the WordBox indices
+  // the caller selected with. HighlightDoc::addHighlight runs the result
+  // through utf8SafeSummary, which collapses whitespace and truncates to 72
+  // bytes, so scanning past LABEL_SCAN_BYTES cannot change the stored label.
+  constexpr size_t LABEL_SCAN_BYTES = 128;
+  std::string label;
+  int index = 0;
+  for (const auto& element : page->elements) {
+    if (element->getTag() != TAG_PageLine) continue;
+    const auto* line = static_cast<const PageLine*>(element.get());
+    const auto& block = line->getBlock();
+    if (!block || !block->valid()) continue;
+
+    const uint16_t wordCount = block->wordCount();
+    for (uint16_t i = 0; i < wordCount; i++, index++) {
+      if (index < lo) continue;
+      if (index > hi) return label;
+      if (!label.empty()) label.push_back(' ');
+      label.append(block->wordText(i), block->wordTextLen(i));
+      if (label.size() >= LABEL_SCAN_BYTES) return label;
+    }
+  }
+  return label;
+}
+
 int PassageSelectActivity::wordAt(const int x, const int y) const {
   constexpr int SLOP = 4;  // matches the outline box (+2) plus finger error
   for (int i = 0; i < static_cast<int>(words.size()); i++) {
@@ -234,6 +260,7 @@ void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<ui
 
   HighlightEntry entry;
   entry.spineIndex = spineIndex;
+  entry.label = selectionLabel(lo, hi);
   // end = last word's offset + 1: contains() tests a word's start offset,
   // offsets are strictly increasing across tokens, and no path emits two
   // words at the same offset (verified; see the plan).
