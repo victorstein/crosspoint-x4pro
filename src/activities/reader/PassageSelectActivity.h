@@ -93,6 +93,9 @@ class PassageSelectActivity final : public Activity {
   // supported outcome, not a failure: a non-Bible EPUB simply keeps the
   // passage-only label.
   std::string verseReference(uint32_t startOffset) const;
+  // Offsets covered by a selection ending at `endIndex`. The preview and the
+  // committed entry both go through this so they cannot disagree.
+  VisibleRange selectionRange(int endIndex) const;
   void drawSelectionOutline();
   void drawHints() const;
 
@@ -125,6 +128,14 @@ class PassageSelectActivity final : public Activity {
 
   Phase phase = Phase::PickingStart;
   int cursor = 0;
+  // Absolute visible-codepoint offset of the first anchor. Survives a page
+  // turn, which the index cannot.
+  static constexpr uint32_t NO_ANCHOR = UINT32_MAX;
+  uint32_t anchorOffset = NO_ANCHOR;
+  // Index of the anchor within `words`, or -1 once a page turn has left its
+  // page. Never recovered by searching for anchorOffset: word offsets are not
+  // unique -- a synthesized table-cell prefix or image alt run emits several
+  // words while the offset is frozen -- so a search would find the wrong one.
   int anchorIndex = -1;
   // The just-committed second anchor, held only across the ChoosingAction
   // phase so the OptionPopup's callback (and the TagPickerActivity result

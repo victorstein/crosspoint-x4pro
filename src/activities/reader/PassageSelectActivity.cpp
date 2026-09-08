@@ -116,6 +116,36 @@ void PassageSelectActivity::extractWords() {
   }
 }
 
+VisibleRange PassageSelectActivity::selectionRange(const int endIndex) const {
+  const uint32_t endOffset = words[endIndex].offset;
+  // Before the first anchor exists the pending range is the cursor word alone.
+  // Without this, NO_ANCHOR would make max() UINT32_MAX and outline every word
+  // to the end of the section.
+  if (phase == Phase::PickingStart || anchorOffset == NO_ANCHOR) {
+    return VisibleRange{endOffset, endOffset + 1};
+  }
+
+  uint32_t minOffset;
+  uint32_t maxOffset;
+  if (anchorIndex >= 0) {
+    // On the anchor's own page, scan: `words` is in visual order, so on an RTL
+    // line a word between the endpoints can hold an offset outside their range.
+    const int lo = std::min(anchorIndex, endIndex);
+    const int hi = std::max(anchorIndex, endIndex);
+    minOffset = maxOffset = words[lo].offset;
+    for (int i = lo; i <= hi; i++) {
+      minOffset = std::min(minOffset, words[i].offset);
+      maxOffset = std::max(maxOffset, words[i].offset);
+    }
+  } else {
+    // A page turn has left the anchor's page; those words are unreachable and
+    // the endpoints are the best available answer.
+    minOffset = std::min(anchorOffset, endOffset);
+    maxOffset = std::max(anchorOffset, endOffset);
+  }
+  return VisibleRange{minOffset, maxOffset + 1};
+}
+
 std::string PassageSelectActivity::verseReference(const uint32_t startOffset) const {
   // The inflated bytes are already on SD from the build; re-inflating the zip
   // entry instead would stall the UI thread for seconds on a large spine item,
@@ -227,6 +257,7 @@ void PassageSelectActivity::moveVertical(const int direction) {
 void PassageSelectActivity::commitAt(const int index) {
   if (phase == Phase::PickingStart) {
     anchorIndex = index;
+    anchorOffset = words[index].offset;
     cursor = index;
     phase = Phase::PickingEnd;
     requestUpdate();
@@ -292,23 +323,17 @@ void PassageSelectActivity::startTagFlow(const int endIndex) {
 }
 
 void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<uint16_t> tagIndices) {
-  const int lo = std::min(anchorIndex, endIndex);
-  const int hi = std::max(anchorIndex, endIndex);
+  const VisibleRange range = selectionRange(endIndex);
 
-  // The two anchors are word-select indices in this page's reading-order
-  // array, not offset order: TextBlock stores words in visual order, which
-  // runs backwards on an RTL line, so the min/max offset in [lo, hi] must be
-  // found by scanning rather than assumed from the endpoints.
-  uint32_t minOffset = words[lo].offset;
-  uint32_t maxOffset = words[lo].offset;
-  for (int i = lo; i <= hi; i++) {
-    minOffset = std::min(minOffset, words[i].offset);
-    maxOffset = std::max(maxOffset, words[i].offset);
-  }
+  // Label indices are page-local. When a page turn has left the anchor's page
+  // anchorIndex is -1, which would index words[] out of bounds, so the snippet
+  // starts at the top of the page the user finished on.
+  const int lo = (anchorIndex >= 0) ? std::min(anchorIndex, endIndex) : 0;
+  const int hi = (anchorIndex >= 0) ? std::max(anchorIndex, endIndex) : endIndex;
 
   HighlightEntry entry;
   entry.spineIndex = spineIndex;
-  const std::string reference = verseReference(minOffset);
+  const std::string reference = verseReference(range.start);
   const std::string passage = selectionLabel(lo, hi);
   // addHighlight truncates to 72 BYTES (Utf8.h:26-31), and the separator costs
   // 4 of them. A long TOC title can leave no room for a useful snippet, so the
@@ -322,10 +347,8 @@ void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<ui
   } else {
     entry.label = reference + " \xc2\xb7 " + passage;
   }
-  // end = last word's offset + 1: contains() tests a word's start offset,
-  // offsets are strictly increasing across tokens, and no path emits two
-  // words at the same offset (verified; see the plan).
-  entry.range = VisibleRange{minOffset, maxOffset + 1};
+  // end is the last word's offset + 1: contains() tests a word's start offset.
+  entry.range = range;
   // Truncated to MAX_TAGS_PER_HIGHLIGHT by addHighlight if ever oversized, but
   // TagPickerActivity already blocks picking a 9th tag, so this is a no-op in
   // practice, not a second, divergent cap.
@@ -447,16 +470,7 @@ bool PassageSelectActivity::handleHomeGesture() {
 }
 
 void PassageSelectActivity::drawSelectionOutline() {
-  const int lo = (phase == Phase::PickingStart) ? cursor : std::min(anchorIndex, cursor);
-  const int hi = (phase == Phase::PickingStart) ? cursor : std::max(anchorIndex, cursor);
-
-  uint32_t minOffset = words[lo].offset;
-  uint32_t maxOffset = words[lo].offset;
-  for (int i = lo; i <= hi; i++) {
-    minOffset = std::min(minOffset, words[i].offset);
-    maxOffset = std::max(maxOffset, words[i].offset);
-  }
-  const VisibleRange pending{minOffset, maxOffset + 1};
+  const VisibleRange pending = selectionRange(cursor);
 
   std::vector<HighlightWord> geomWords;
   geomWords.reserve(words.size());
