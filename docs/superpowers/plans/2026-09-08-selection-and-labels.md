@@ -10,6 +10,31 @@
 
 **Depends on:** `docs/superpowers/specs/2026-09-08-selection-and-labels-design.md`. Baseline **224 host tests** at `f6516add`.
 
+> **v2 — revised after adversarial review.**
+>
+> v1's feature 2 did not work. The scan registered two expat handlers where the
+> real parser registers three: `XML_SetDefaultHandlerExpand`
+> (`ChapterHtmlSlimParser.cpp:1575`) feeds expanded entities back through
+> `characterData` (`:1355-1368`), so every `&nbsp;` shifted the count by one and
+> every unknown entity by five. Its `isBody`/`isNonVisible` were case-sensitive
+> and namespace-stripping; the parser's are the exact opposite
+> (`:397-401`, `VisibleTextUtils.h:8-20`). Measured divergence on ordinary input.
+>
+> Worse, v1 argued a 3-codepoint agreement proved the counter correct. That is
+> backwards: `find()` takes the greatest anchor <= the offset and verse markers
+> sit **at** verse boundaries, so a few codepoints IS the entire margin between
+> verse N and N-1. The cited evidence was a reproduction of the failure mode.
+>
+> **v2 stops re-implementing the counter.** Task 1 extracts the gate and counter
+> into one unit both walks call, so "the two agree" is true by construction
+> rather than by a test that cannot fail. Task 7 adds a device self-check
+> against offsets the section cache already stores.
+>
+> v1 also shipped the off-by-one feature 3 was written to prevent: `activateIndex`
+> and `onRowLongPress` receive `event.value` (an `actionValue`), not a row index,
+> and `handleButtons` was missing from the plan entirely — while v1's own
+> verification grep was written so that miss would pass.
+
 **Delivery:** fork-only.
 
 > **Verified before writing this plan** (do not re-litigate):
@@ -24,7 +49,10 @@
 
 | File | Responsibility |
 | --- | --- |
-| `lib/Epub/Epub/VerseAnchors.h` / `.cpp` (create) | Pure: scan XHTML for anchor offsets; resolve an offset to `chapter:verse` |
+| `lib/Epub/Epub/VisibleOffsetCounter.h` (create) | The gate and codepoint counter, shared verbatim by the layout parser and the verse scan |
+| `lib/Epub/Epub/parsers/ChapterHtmlSlimParser.{h,cpp}` (modify) | Delegate its counter to the shared unit — behaviour-preserving |
+| `lib/Epub/Epub/Section.{h,cpp}` (modify) | Add `htmlCachePath()`; fold the two existing inline copies into it |
+| `lib/Epub/Epub/VerseAnchors.h` / `.cpp` (create) | Scan a spine item for verse-anchor offsets; resolve an offset to `chapter:verse` |
 | `test/verse_anchors/VerseAnchorsTest.cpp` + `CMakeLists.txt` (create) | Host tests, compiling the repo's expat |
 | `test/CMakeLists.txt` (modify) | Register the suite |
 | `src/activities/reader/PassageSelectActivity.{h,cpp}` (modify) | Absolute anchor, forward page turn, reference label |
@@ -33,11 +61,168 @@
 
 ---
 
-### Task 1: `VerseAnchors` — the pure core
+### Task 1: one counter, shared by both walks
 
-**Files:** create `lib/Epub/Epub/VerseAnchors.h`, `lib/Epub/Epub/VerseAnchors.cpp`, `test/verse_anchors/VerseAnchorsTest.cpp`, `test/verse_anchors/CMakeLists.txt`; modify `test/CMakeLists.txt`
+**Files:** create `lib/Epub/Epub/VisibleOffsetCounter.h`, `test/visible_offset/VisibleOffsetTest.cpp`, `test/visible_offset/CMakeLists.txt`; modify `lib/Epub/Epub/parsers/ChapterHtmlSlimParser.{h,cpp}`, `test/CMakeLists.txt`
 
-- [ ] **Step 1: Write the header**
+The review's central finding: a second implementation of this counter cannot be
+kept in agreement by testing, because the tests are written by whoever wrote the
+drift. So there is only one implementation.
+
+- [ ] **Step 1: Write the shared unit**
+
+`lib/Epub/Epub/VisibleOffsetCounter.h`:
+
+```cpp
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+
+#include "VisibleTextUtils.h"
+
+// The canonical visible-codepoint counter. ChapterHtmlSlimParser owns the
+// reading-position semantics; this holds the state machine so a second walk
+// (VerseAnchors) can count identically instead of approximating it.
+//
+// Predicates are the parser's, verbatim: strcasecmp on the FULL element name
+// for <body> (ChapterHtmlSlimParser.cpp:397-401), and
+// VisibleTextUtils::isNonVisibleElement -- case-insensitive, no namespace
+// stripping (VisibleTextUtils.h:8-20).
+struct VisibleOffsetCounter {
+  uint32_t offset = 0;
+  int nonVisibleDepth = 0;
+  bool insideBody = false;
+
+  void onStartElement(const char* name) {
+    if (strcasecmp(name, "body") == 0) insideBody = true;
+    if (insideBody && (nonVisibleDepth > 0 || VisibleTextUtils::isNonVisibleElement(name))) nonVisibleDepth++;
+  }
+
+  void onEndElement(const char* name) {
+    if (nonVisibleDepth > 0) nonVisibleDepth--;
+    if (strcasecmp(name, "body") == 0) insideBody = false;
+  }
+
+  bool counting() const { return insideBody && nonVisibleDepth == 0; }
+
+  // Callers gate on their own synthetic flag before calling: parser-injected
+  // table-cell prefixes and image alt text must not advance the offset.
+  void onCharacterData(const char* s, const int len) {
+    if (!counting()) return;
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    for (int i = 0; i < len; i++) {
+      if ((p[i] & 0xC0) != 0x80) offset++;  // skip UTF-8 continuation bytes
+    }
+  }
+};
+```
+
+- [ ] **Step 2: Make the parser delegate to it**
+
+In `ChapterHtmlSlimParser.h`, replace the three members `visibleTextOffset`,
+`nonVisibleTextDepth` and `insideBody` with `VisibleOffsetCounter visibleCounter_`,
+and add `uint32_t visibleTextOffset() const { return visibleCounter_.offset; }`
+so existing readers keep working.
+
+In `startElement` replace the `insideBody`/`nonVisibleTextDepth` block
+(`:397-405`) with `self->visibleCounter_.onStartElement(name);`. In `endElement`
+replace `:1373-1374` with `self->visibleCounter_.onEndElement(name);`. In
+`characterData` replace the counting block (`:1149-1158`) with:
+
+```cpp
+  const uint32_t callbackVisibleOffset = self->visibleCounter_.offset;
+  if (!self->syntheticCharacterData) self->visibleCounter_.onCharacterData(s, len);
+```
+
+**This must be behaviour-preserving.** Any change to the offsets it produces
+invalidates every cached section on every device.
+
+- [ ] **Step 3: Prove it is behaviour-preserving**
+
+```bash
+cmake --build build/test && ctest --test-dir build/test -j
+```
+
+Expected: **224/224**, unchanged. The pagination-invariance suite exercises the
+offset pipeline end to end; a regression here fails it.
+
+- [ ] **Step 4: Test the counter directly**
+
+`test/visible_offset/VisibleOffsetTest.cpp` — the cases v1's tests could not detect:
+
+```cpp
+#include <gtest/gtest.h>
+
+#include <cstring>
+
+#include "VisibleOffsetCounter.h"
+
+TEST(VisibleOffsetCounter, IsCaseInsensitiveOnBodyAndNonVisibleTags) {
+  VisibleOffsetCounter c;
+  c.onStartElement("BODY");
+  EXPECT_TRUE(c.insideBody) << "the parser uses strcasecmp, not strcmp";
+  c.onStartElement("TITLE");
+  c.onCharacterData("skipme", 6);
+  EXPECT_EQ(c.offset, 0u) << "<TITLE> inside <body> must not be counted";
+}
+
+TEST(VisibleOffsetCounter, DoesNotStripNamespacePrefixes) {
+  VisibleOffsetCounter c;
+  c.onStartElement("h:body");
+  EXPECT_FALSE(c.insideBody) << "the parser matches the full name; a prefixed body is not <body>";
+}
+
+TEST(VisibleOffsetCounter, CountsCodepointsNotBytes) {
+  VisibleOffsetCounter c;
+  c.onStartElement("body");
+  c.onCharacterData("\xc3\xa9\xc3\xa9", 4);
+  EXPECT_EQ(c.offset, 2u);
+}
+
+TEST(VisibleOffsetCounter, NestedNonVisibleSubtreesUnwindSymmetrically) {
+  VisibleOffsetCounter c;
+  c.onStartElement("body");
+  c.onStartElement("head");
+  c.onStartElement("span");   // every start inside a non-visible subtree increments
+  c.onEndElement("span");
+  c.onEndElement("head");
+  c.onCharacterData("abc", 3);
+  EXPECT_EQ(c.offset, 3u) << "the gate must reopen once the subtree closes";
+}
+```
+
+`test/visible_offset/CMakeLists.txt`:
+
+```cmake
+add_executable(VisibleOffsetTest VisibleOffsetTest.cpp)
+target_include_directories(VisibleOffsetTest PRIVATE ${REPO_ROOT}/lib/Epub/Epub)
+target_link_libraries(VisibleOffsetTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(VisibleOffsetTest)
+```
+
+Append `add_subdirectory(visible_offset)` to `test/CMakeLists.txt`. **Append —
+that list is not alphabetical, it is append-ordered.**
+
+- [ ] **Step 5: Build both boards and commit**
+
+```bash
+cmake --build build/test && ctest --test-dir build/test -j
+pio run -e x4pro
+pio run -e default
+git add lib/Epub/Epub/VisibleOffsetCounter.h lib/Epub/Epub/parsers/ChapterHtmlSlimParser.h lib/Epub/Epub/parsers/ChapterHtmlSlimParser.cpp test/visible_offset test/CMakeLists.txt
+git commit -m "refactor(epub): extract the visible-codepoint counter"
+```
+
+Expected **228** host tests (224 + 4). Run the `pio` invocations sequentially.
+
+---
+
+### Task 2: `VerseAnchors`
+
+**Files:** create `lib/Epub/Epub/VerseAnchors.{h,cpp}`, `test/verse_anchors/{VerseAnchorsTest.cpp,CMakeLists.txt}`; modify `test/CMakeLists.txt`
+
+- [ ] **Step 1: Header**
 
 ```cpp
 #pragma once
@@ -46,152 +231,26 @@
 #include <string>
 #include <vector>
 
-// Maps visible-codepoint offsets inside one spine item to Bible verse
-// references, for labelling a highlight.
-//
-// The scan reproduces ChapterHtmlSlimParser::characterData
-// (ChapterHtmlSlimParser.cpp:1147-1158): codepoints are counted while
-// insideBody && nonVisibleTextDepth == 0. Parser-injected heading and image
-// alt text is marked synthetic there and never appears in the source stream,
-// so it needs no handling here. It uses the same expat build as the firmware,
-// so tokenisation cannot drift.
 namespace VerseAnchors {
 
 struct VerseAnchor {
-  uint32_t offset;   // visible codepoints from the start of the spine item
+  uint32_t offset;
   uint16_t chapter;
   uint16_t verse;
 };
 
-// Anchors with ids shaped `chapter<N>_verse<M>`, in ascending offset order.
-// Other ids are ignored. Returns empty for a document with no such anchors.
+// Anchors shaped `chapter<N>_verse<M>`, ascending by offset. Empty when the
+// document has none, or when the parse fails part-way -- a partial list would
+// resolve later highlights to a stale anchor with no way for the caller to tell.
 std::vector<VerseAnchor> scan(const char* xhtml, size_t length);
 
-// The anchor covering `offset` (greatest offset <= it), or nullptr.
 const VerseAnchor* find(const std::vector<VerseAnchor>& anchors, uint32_t offset);
-
-// "11:19", or empty when `anchor` is null.
 std::string format(const VerseAnchor* anchor);
 
 }  // namespace VerseAnchors
 ```
 
-- [ ] **Step 2: Write the failing tests**
-
-`test/verse_anchors/VerseAnchorsTest.cpp`:
-
-```cpp
-#include <gtest/gtest.h>
-
-#include "VerseAnchors.h"
-
-namespace {
-// Mirrors the shape the real book uses: empty marker spans followed by the
-// verse text as siblings, two verses sharing one <p>.
-const char* kDoc =
-    "<html><head><title>skipme</title></head><body>"
-    "<p id=\"p1\">"
-    "<span id=\"chapter11_verse18\"></span><strong><sup>18</sup></strong> abcde"
-    "<span id=\"chapter11_verse19\"></span><strong><sup>19</sup></strong> fghij"
-    "</p></body></html>";
-}  // namespace
-
-TEST(VerseAnchorsScan, FindsEachVerseMarkerInOffsetOrder) {
-  const auto a = VerseAnchors::scan(kDoc, strlen(kDoc));
-  ASSERT_EQ(a.size(), 2u);
-  EXPECT_EQ(a[0].chapter, 11); EXPECT_EQ(a[0].verse, 18);
-  EXPECT_EQ(a[1].chapter, 11); EXPECT_EQ(a[1].verse, 19);
-  EXPECT_LT(a[0].offset, a[1].offset);
-}
-
-TEST(VerseAnchorsScan, DoesNotCountNonVisibleText) {
-  // "skipme" sits in <title>; counting it would push verse 18 to offset 6.
-  const auto a = VerseAnchors::scan(kDoc, strlen(kDoc));
-  ASSERT_FALSE(a.empty());
-  EXPECT_EQ(a[0].offset, 0u);
-}
-
-TEST(VerseAnchorsScan, CountsCodepointsNotBytes) {
-  const char* doc =
-      "<html><body><p><span id=\"chapter1_verse1\"></span>\xc3\xa9\xc3\xa9"
-      "<span id=\"chapter1_verse2\"></span>x</p></body></html>";
-  const auto a = VerseAnchors::scan(doc, strlen(doc));
-  ASSERT_EQ(a.size(), 2u);
-  EXPECT_EQ(a[1].offset, 2u) << "two 2-byte codepoints must advance by 2, not 4";
-}
-
-TEST(VerseAnchorsScan, IgnoresIdsThatAreNotVerseMarkers) {
-  const char* doc =
-      "<html><body><p id=\"p188\"><span id=\"pos107452\"></span>"
-      "<span id=\"footnotesource14\"></span>abc</p></body></html>";
-  EXPECT_TRUE(VerseAnchors::scan(doc, strlen(doc)).empty());
-}
-
-TEST(VerseAnchorsFind, ReturnsTheAnchorCoveringAnOffset) {
-  const auto a = VerseAnchors::scan(kDoc, strlen(kDoc));
-  ASSERT_EQ(a.size(), 2u);
-  EXPECT_EQ(VerseAnchors::find(a, a[1].offset + 2)->verse, 19);
-  EXPECT_EQ(VerseAnchors::find(a, a[0].offset)->verse, 18) << "exactly on a marker is inside it";
-}
-
-TEST(VerseAnchorsFind, ReturnsNullBeforeTheFirstAnchorAndForEmptyInput) {
-  std::vector<VerseAnchors::VerseAnchor> anchors{{5, 1, 1}};
-  EXPECT_EQ(VerseAnchors::find(anchors, 4), nullptr);
-  EXPECT_EQ(VerseAnchors::find({}, 0), nullptr);
-}
-
-TEST(VerseAnchorsFormat, RendersChapterColonVerseAndEmptyForNull) {
-  const VerseAnchors::VerseAnchor a{0, 11, 19};
-  EXPECT_EQ(VerseAnchors::format(&a), "11:19");
-  EXPECT_EQ(VerseAnchors::format(nullptr), "");
-}
-```
-
-- [ ] **Step 3: Write the CMake wiring**
-
-`test/verse_anchors/CMakeLists.txt` — note expat is compiled here with the **same flags `platformio.ini` passes**, so host and firmware tokenise identically:
-
-```cmake
-add_executable(VerseAnchorsTest
-  VerseAnchorsTest.cpp
-  ${REPO_ROOT}/lib/Epub/Epub/VerseAnchors.cpp
-  ${REPO_ROOT}/lib/expat/xmlparse.c
-  ${REPO_ROOT}/lib/expat/xmlrole.c
-  ${REPO_ROOT}/lib/expat/xmltok.c
-)
-
-target_include_directories(VerseAnchorsTest PRIVATE
-  ${REPO_ROOT}/lib/Epub/Epub
-  ${REPO_ROOT}/lib/expat
-)
-
-target_compile_definitions(VerseAnchorsTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=1024)
-
-target_link_libraries(VerseAnchorsTest PRIVATE
-  crosspoint_test_common
-  GTest::gtest_main
-)
-
-gtest_discover_tests(VerseAnchorsTest)
-```
-
-Add to `test/CMakeLists.txt`, alphabetically among the existing `add_subdirectory` lines:
-
-```cmake
-add_subdirectory(verse_anchors)
-```
-
-- [ ] **Step 4: Run and confirm it fails**
-
-```bash
-cmake -S test -B build/test && cmake --build build/test --target VerseAnchorsTest
-```
-
-Expected: **configure or build failure** — `VerseAnchors.cpp` does not exist yet. That is the TDD checkpoint.
-
-- [ ] **Step 5: Implement**
-
-`lib/Epub/Epub/VerseAnchors.cpp`:
+- [ ] **Step 2: Implementation — all three handlers**
 
 ```cpp
 #include "VerseAnchors.h"
@@ -201,60 +260,53 @@ Expected: **configure or build failure** — `VerseAnchors.cpp` does not exist y
 #include <cstdio>
 #include <cstring>
 
+#include "VisibleOffsetCounter.h"
+#include "htmlEntities.h"
+
 namespace VerseAnchors {
 namespace {
 
-// Same list as VisibleTextUtils::isNonVisibleElement (VisibleTextUtils.h:17-20).
-bool isNonVisible(const char* name) {
-  const char* colon = strchr(name, ':');
-  const char* n = colon ? colon + 1 : name;
-  return strcmp(n, "head") == 0 || strcmp(n, "style") == 0 || strcmp(n, "script") == 0 ||
-         strcmp(n, "title") == 0 || strcmp(n, "rp") == 0;
-}
-
-bool isBody(const char* name) {
-  const char* colon = strchr(name, ':');
-  return strcmp(colon ? colon + 1 : name, "body") == 0;
-}
-
 struct State {
+  VisibleOffsetCounter counter;
   std::vector<VerseAnchor> anchors;
-  uint32_t offset = 0;
-  int nonVisibleDepth = 0;
-  bool insideBody = false;
 };
 
 void XMLCALL onStart(void* userData, const XML_Char* name, const XML_Char** atts) {
   auto* s = static_cast<State*>(userData);
-  if (isBody(name)) s->insideBody = true;
-  if (s->insideBody && (s->nonVisibleDepth > 0 || isNonVisible(name))) s->nonVisibleDepth++;
-  if (!s->insideBody) return;
-
+  s->counter.onStartElement(name);
+  if (!s->counter.insideBody) return;
   for (int i = 0; atts && atts[i]; i += 2) {
     if (strcmp(atts[i], "id") != 0) continue;
     unsigned chapter = 0, verse = 0;
     char tail = '\0';
-    // %c catches trailing junk so "chapter1_verse2x" is rejected.
-    if (sscanf(atts[i + 1], "chapter%u_verse%u%c", &chapter, &verse, &tail) == 2 &&
-        chapter <= UINT16_MAX && verse <= UINT16_MAX) {
-      s->anchors.push_back({s->offset, static_cast<uint16_t>(chapter), static_cast<uint16_t>(verse)});
+    if (sscanf(atts[i + 1], "chapter%u_verse%u%c", &chapter, &verse, &tail) == 2 && chapter <= UINT16_MAX &&
+        verse <= UINT16_MAX) {
+      s->anchors.push_back({s->counter.offset, static_cast<uint16_t>(chapter), static_cast<uint16_t>(verse)});
     }
     break;
   }
 }
 
 void XMLCALL onEnd(void* userData, const XML_Char* name) {
-  auto* s = static_cast<State*>(userData);
-  if (s->nonVisibleDepth > 0) s->nonVisibleDepth--;
-  if (isBody(name)) s->insideBody = false;
+  static_cast<State*>(userData)->counter.onEndElement(name);
 }
 
 void XMLCALL onText(void* userData, const XML_Char* text, const int len) {
-  auto* s = static_cast<State*>(userData);
-  if (!s->insideBody || s->nonVisibleDepth != 0) return;
-  // Count codepoints, not bytes: continuation bytes are 10xxxxxx.
-  for (int i = 0; i < len; i++) {
-    if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) s->offset++;
+  static_cast<State*>(userData)->counter.onCharacterData(text, len);
+}
+
+// Mirrors ChapterHtmlSlimParser::defaultHandlerExpand (:1355-1368). Without
+// this, every named entity before a highlight shifts the offset -- by one for a
+// known entity, by the whole `&foo;` run for an unknown one -- and a deficit of
+// even one codepoint resolves a highlight to the PREVIOUS verse.
+void XMLCALL onDefault(void* userData, const XML_Char* s, const int len) {
+  if (len >= 3 && s[0] == '&' && s[len - 1] == ';') {
+    const char* value = lookupHtmlEntity(s, static_cast<size_t>(len));
+    if (value != nullptr) {
+      onText(userData, value, static_cast<int>(strlen(value)));
+      return;
+    }
+    onText(userData, s, len);
   }
 }
 
@@ -262,20 +314,23 @@ void XMLCALL onText(void* userData, const XML_Char* text, const int len) {
 
 std::vector<VerseAnchor> scan(const char* xhtml, const size_t length) {
   State state;
+  state.anchors.reserve(64);  // Psalm 119 has 176; 64 covers the common chapter
   XML_Parser parser = XML_ParserCreate(nullptr);
   if (!parser) return {};
   XML_SetUserData(parser, &state);
   XML_SetElementHandler(parser, onStart, onEnd);
   XML_SetCharacterDataHandler(parser, onText);
-  XML_Parse(parser, xhtml, static_cast<int>(length), 1);
+  XML_SetDefaultHandlerExpand(parser, onDefault);
+  const auto status = XML_Parse(parser, xhtml, static_cast<int>(length), 1);
   XML_ParserFree(parser);
+  if (status == XML_STATUS_ERROR) return {};
   return std::move(state.anchors);
 }
 
 const VerseAnchor* find(const std::vector<VerseAnchor>& anchors, const uint32_t offset) {
   const VerseAnchor* best = nullptr;
   for (const auto& a : anchors) {
-    if (a.offset > offset) break;  // ascending by construction
+    if (a.offset > offset) break;
     best = &a;
   }
   return best;
@@ -291,15 +346,94 @@ std::string format(const VerseAnchor* anchor) {
 }  // namespace VerseAnchors
 ```
 
-- [ ] **Step 6: Run and confirm it passes**
+- [ ] **Step 3: Tests, including the divergences v1 could not detect**
 
-```bash
-cmake --build build/test --target VerseAnchorsTest && ctest --test-dir build/test -R VerseAnchors --output-on-failure
+`test/verse_anchors/VerseAnchorsTest.cpp` — note `#include <cstring>` explicitly:
+
+```cpp
+#include <gtest/gtest.h>
+
+#include <cstring>
+
+#include "VerseAnchors.h"
+
+TEST(VerseAnchorsScan, CountsAKnownEntityAsOneCodepoint) {
+  // The v1 failure: without a default handler this returned 4, not 5.
+  const char* doc =
+      "<html><body><p><span id=\"chapter1_verse1\"></span>ab&nbsp;cd"
+      "<span id=\"chapter1_verse2\"></span>x</p></body></html>";
+  const auto a = VerseAnchors::scan(doc, strlen(doc));
+  ASSERT_EQ(a.size(), 2u);
+  EXPECT_EQ(a[1].offset, 5u) << "&nbsp; must advance the offset by exactly one";
+}
+
+TEST(VerseAnchorsScan, SkipsUppercaseNonVisibleElementsInsideBody) {
+  const char* doc =
+      "<html><body><TITLE>skipme</TITLE><span id=\"chapter1_verse1\"></span>abc</body></html>";
+  const auto a = VerseAnchors::scan(doc, strlen(doc));
+  ASSERT_EQ(a.size(), 1u);
+  EXPECT_EQ(a[0].offset, 0u) << "isNonVisibleElement is case-insensitive";
+}
+
+TEST(VerseAnchorsScan, ReturnsNothingWhenTheDocumentIsMalformed) {
+  const char* doc = "<html><body><span id=\"chapter1_verse1\"></span>abc<unclosed>";
+  EXPECT_TRUE(VerseAnchors::scan(doc, strlen(doc)).empty())
+      << "a partial list would resolve later highlights to a stale anchor";
+}
+
+TEST(VerseAnchorsScan, IgnoresIdsThatAreNotVerseMarkers) {
+  const char* doc =
+      "<html><body><p id=\"p188\"><span id=\"pos107452\"></span>"
+      "<span id=\"footnotesource14\"></span>abc</p></body></html>";
+  EXPECT_TRUE(VerseAnchors::scan(doc, strlen(doc)).empty());
+}
+
+TEST(VerseAnchorsFind, ReturnsTheAnchorCoveringAnOffsetAndNullBeforeTheFirst) {
+  std::vector<VerseAnchors::VerseAnchor> anchors{{5, 1, 1}, {20, 1, 2}};
+  EXPECT_EQ(VerseAnchors::find(anchors, 5)->verse, 1);
+  EXPECT_EQ(VerseAnchors::find(anchors, 19)->verse, 1);
+  EXPECT_EQ(VerseAnchors::find(anchors, 20)->verse, 2);
+  EXPECT_EQ(VerseAnchors::find(anchors, 4), nullptr);
+  EXPECT_EQ(VerseAnchors::find({}, 0), nullptr);
+}
+
+TEST(VerseAnchorsFormat, RendersChapterColonVerseAndEmptyForNull) {
+  const VerseAnchors::VerseAnchor a{0, 11, 19};
+  EXPECT_EQ(VerseAnchors::format(&a), "11:19");
+  EXPECT_EQ(VerseAnchors::format(nullptr), "");
+}
 ```
 
-Expected: **7/7 pass**.
+`test/verse_anchors/CMakeLists.txt` — expat compiled as **C** with the firmware's flags:
 
-- [ ] **Step 7: Full suite, then commit**
+```cmake
+add_executable(VerseAnchorsTest
+  VerseAnchorsTest.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/VerseAnchors.cpp
+  ${REPO_ROOT}/lib/Epub/Epub/htmlEntities.cpp
+  ${REPO_ROOT}/lib/expat/xmlparse.c
+  ${REPO_ROOT}/lib/expat/xmlrole.c
+  ${REPO_ROOT}/lib/expat/xmltok.c
+)
+
+target_include_directories(VerseAnchorsTest PRIVATE
+  ${REPO_ROOT}/lib/Epub/Epub
+  ${REPO_ROOT}/lib/expat
+)
+
+target_compile_definitions(VerseAnchorsTest PRIVATE XML_GE=0 XML_CONTEXT_BYTES=1024)
+
+target_link_libraries(VerseAnchorsTest PRIVATE crosspoint_test_common GTest::gtest_main)
+
+gtest_discover_tests(VerseAnchorsTest)
+```
+
+`xmltok_impl.c` and `xmltok_ns.c` are `#include`d by `xmltok.c` — do not list them.
+The top-level `project(... C CXX)` declaration is load-bearing: these compile as C.
+
+Append `add_subdirectory(verse_anchors)` to `test/CMakeLists.txt`.
+
+- [ ] **Step 4: Run, then commit**
 
 ```bash
 cmake --build build/test && ctest --test-dir build/test -j
@@ -307,132 +441,120 @@ git add lib/Epub/Epub/VerseAnchors.h lib/Epub/Epub/VerseAnchors.cpp test/verse_a
 git commit -m "feat(epub): resolve a visible offset to a verse reference"
 ```
 
-Expected: **231 tests** (224 + 7).
+Expected **234** tests (228 + 6).
 
 ---
 
-### Task 2: label a new highlight with its reference
+### Task 3: label a new highlight with its reference
 
 **Files:** modify `src/activities/reader/PassageSelectActivity.{h,cpp}`, `src/activities/reader/EpubReaderActivity.cpp`
 
-- [ ] **Step 1: Give the activity what it needs to resolve a reference**
+- [ ] **Step 1: Pass the book in**
 
-`PassageSelectActivity` currently receives a `Page` and a `spineIndex` but no `Epub`. Add `Epub& epub` as a constructor parameter, stored as a reference member `Epub& epub;` beside `highlightDoc`. Update the single construction site in `EpubReaderActivity::openHighlightPassage` (`:349-353`) to pass `*epub`.
+Add `Epub& epub` to the constructor, stored as a reference member. Update the one
+construction site, `EpubReaderActivity::openHighlightPassage` (`:349-353`), to pass
+`*epub`. Include it as `#include <Epub/VerseAnchors.h>` in the `.cpp` (firmware
+convention; the host CMake adds `lib/Epub/Epub` so its tests use `"VerseAnchors.h"`).
 
-- [ ] **Step 2: Build the reference at save time**
+- [ ] **Step 2: Read from the HTML cache, not the zip**
 
-Add to `PassageSelectActivity.h`, next to `selectionLabel`:
-
-```cpp
-  // "Mateo 11:19", or empty when this book has no verse anchors.
-  std::string verseReference(uint32_t startOffset) const;
-```
-
-In `PassageSelectActivity.cpp`:
+The bytes are already inflated on SD: `Section::startBuild` writes
+`<cachePath>/html/<spineIndex>.html` and `Section::hasHtmlCache()` (`:461-462`)
+reports it. Re-inflating the zip entry instead would block the UI thread for
+seconds on a large spine item, at the moment the user taps Highlight.
 
 ```cpp
 std::string PassageSelectActivity::verseReference(const uint32_t startOffset) const {
-  const auto spine = epub.getSpineItem(spineIndex);
-  if (spine.href.empty()) return {};
+  if (!section.hasHtmlCache()) return {};
 
-  size_t size = 0;
-  // Owned buffer: readItemContentsToBytes allocates and the caller frees.
-  auto* bytes = epub.readItemContentsToBytes(spine.href, &size, /*trailingNullByte=*/false);
-  if (!bytes) return {};
-  const auto anchors = VerseAnchors::scan(reinterpret_cast<const char*>(bytes), size);
-  free(bytes);
+  HalFile file;
+  if (!Storage.openFileForRead("PSA", section.htmlCachePath(), file)) return {};
+
+  // NOTE: htmlCachePath() does not exist yet. Section builds this string inline
+  // in two places already (Section.cpp:276-277 and :461). Add the accessor and
+  // route BOTH existing sites through it rather than adding a third copy:
+  //   std::string Section::htmlCachePath() const {
+  //     return epub->getCachePath() + "/html/" + std::to_string(spineIndex) + ".html";
+  //   }
+
+  // Chunked parse: never hold the whole spine item resident.
+  XML_Parser parser = nullptr;
+  std::vector<VerseAnchors::VerseAnchor> anchors = VerseAnchors::scanStream(file, parser);
+  if (anchors.empty()) return {};
 
   const std::string verse = VerseAnchors::format(VerseAnchors::find(anchors, startOffset));
   if (verse.empty()) return {};
 
-  // Book name comes from the covering TOC entry, never a built-in table: a
-  // hardcoded list would be wrong in every other language and every non-Bible book.
+  const auto spine = epub.getSpineItem(spineIndex);
   if (spine.tocIndex < 0) return verse;
   const auto toc = epub.getTocItem(spine.tocIndex);
-  if (toc.title.empty()) return verse;
-  return toc.title + " " + verse;
+  return toc.title.empty() ? verse : toc.title + " " + verse;
 }
 ```
 
-- [ ] **Step 3: Prepend it to the label**
+Add `scanStream(HalFile&)` to `VerseAnchors` alongside `scan()`, driving expat with
+`XML_GetBuffer`/`XML_ParseBuffer` in fixed chunks exactly as
+`ChapterHtmlSlimParser::parseStep` does (`:1595-1618`). `scan()` stays for tests.
 
-In `finalizeSelection`, replace the single label line with:
+- [ ] **Step 3: Compose within the byte budget**
+
+`utf8SafeSummary` truncates at **72 bytes, not characters** (`Utf8.h:26-31`), and
+the separator costs 4. A long TOC title can consume the whole budget:
 
 ```cpp
   const std::string reference = verseReference(minOffset);
   const std::string passage = selectionLabel(lo, hi);
-  // addHighlight truncates to 72 bytes, so the reference is placed first: it
-  // is the part that must survive truncation.
-  entry.label = reference.empty() ? passage : (reference + " \xc2\xb7 " + passage);
+  static constexpr size_t LABEL_BUDGET = 72;
+  static constexpr size_t MIN_SNIPPET = 16;
+  if (reference.empty()) {
+    entry.label = passage;
+  } else if (reference.size() + 4 + MIN_SNIPPET > LABEL_BUDGET) {
+    entry.label = reference;  // no room for a useful snippet; keep the reference whole
+  } else {
+    entry.label = reference + " \xc2\xb7 " + passage;
+  }
 ```
 
 - [ ] **Step 4: Build both boards and commit**
 
 ```bash
-pio run -e x4pro && pio run -e default
-git add src/activities/reader/PassageSelectActivity.h src/activities/reader/PassageSelectActivity.cpp src/activities/reader/EpubReaderActivity.cpp
-git commit -m "feat(highlights): label a highlight with its verse reference"
+pio run -e x4pro
+pio run -e default
+git commit -am "feat(highlights): label a highlight with its verse reference"
 ```
-
-Run the two `pio` invocations **sequentially** — they race on a shared `idf_component.yml`.
 
 ---
 
-### Task 3: store the first anchor as an absolute offset
+### Task 4: anchor a selection by offset
 
 **Files:** modify `src/activities/reader/PassageSelectActivity.{h,cpp}`
 
-No behaviour change. This is the refactor that makes Task 4 possible.
+- [ ] **Step 1: Keep both, and never search by offset**
 
-- [ ] **Step 1: Replace the member**
-
-In `PassageSelectActivity.h:113`, replace `int anchorIndex = -1;` with:
+Word offsets are **not** unique: a synthesized table-cell prefix
+(`ChapterHtmlSlimParser.cpp:534-551`) and the image `alt` fallback (`:854-863`)
+emit several words while the offset is frozen. Searching for the anchor by offset
+equality would resolve to the first of them. So the index is kept while it is
+still valid, and only abandoned at a page turn:
 
 ```cpp
-  // Absolute visible-codepoint offset, not an index into `words`: the anchor
-  // must outlive the page it was placed on (see Task 4).
   static constexpr uint32_t NO_ANCHOR = UINT32_MAX;
   uint32_t anchorOffset = NO_ANCHOR;
+  // Index of the anchor in `words`, or -1 once a page turn has left its page.
+  // Never recovered by searching: offsets are not unique.
+  int anchorIndex = -1;
 ```
 
-- [ ] **Step 2: Set it in `commitAt`**
+`commitAt`'s `PickingStart` branch sets both: `anchorOffset = words[index].offset;
+anchorIndex = index;`.
 
-```cpp
-  if (phase == Phase::PickingStart) {
-    anchorOffset = words[index].offset;
-    cursor = index;
-    phase = Phase::PickingEnd;
-    requestUpdate();
-    return;
-  }
-```
-
-- [ ] **Step 3: Resolve the range from offsets, not indices**
-
-`finalizeSelection` currently scans `words[lo..hi]`. Replace the min/max block with:
-
-```cpp
-  const uint32_t cursorOffset = words[endIndex].offset;
-  const uint32_t minOffset = std::min(anchorOffset, cursorOffset);
-  const uint32_t maxOffset = std::max(anchorOffset, cursorOffset);
-```
-
-**This is not a pure refactor and must not be described as one.** The index
-scan exists because `words` is in visual order: on an RTL line a word *between*
-the two endpoints can hold an offset outside `[anchorOffset, cursorOffset]`, and
-the scan catches it. Comparing only the endpoints drops those words from the
-stored range.
-
-Same-page selections keep the scan for exactly that reason. The endpoint
-comparison is used **only** when the anchor is not on the current page, where
-the intervening words are unreachable and no better answer exists:
+- [ ] **Step 2: Resolve the range, on-page exactly and cross-page by endpoints**
 
 ```cpp
   uint32_t minOffset, maxOffset;
-  const int anchorIdx = anchorIndexOnThisPage();
-  if (anchorIdx >= 0) {
-    const int lo = std::min(anchorIdx, endIndex);
-    const int hi = std::max(anchorIdx, endIndex);
+  if (anchorIndex >= 0) {
+    const int lo = std::min(anchorIndex, endIndex);
+    const int hi = std::max(anchorIndex, endIndex);
     minOffset = maxOffset = words[lo].offset;
     for (int i = lo; i <= hi; i++) {
       minOffset = std::min(minOffset, words[i].offset);
@@ -444,172 +566,170 @@ the intervening words are unreachable and no better answer exists:
   }
 ```
 
-The residual imprecision is confined to an RTL line on a page boundary of a
-multi-page selection. It is accepted and recorded, not hidden.
+The scan stays for the on-page case because `words` is in visual order and an RTL
+line can hold an in-between word outside the endpoint range. Cross-page, those
+words are unreachable and the endpoints are the best available answer.
 
-`selectionLabel(lo, hi)` still needs page-local indices, so keep `lo`/`hi`
-derived from `anchorIndexOnThisPage()` (below) and `endIndex`; when the anchor
-is not on this page, start the label at index 0.
+- [ ] **Step 3: The preview must use the SAME split**
 
-- [ ] **Step 4: Add the page-local lookup used by the outline and label**
+`drawSelectionOutline` (`:389-397`) runs the identical scan today. It must adopt
+Step 2's branch verbatim, or on an RTL page the outline shown and the range stored
+are different sets of words. **Keep its `Phase::PickingStart` carve-out**: with
+`anchorOffset == UINT32_MAX`, a naive min/max outlines every word to the end of
+the section before the first anchor is even placed.
 
-```cpp
-// Index of the anchor word on the current page, or -1 when the anchor was
-// placed on an earlier page.
-int PassageSelectActivity::anchorIndexOnThisPage() const {
-  if (anchorOffset == NO_ANCHOR) return -1;
-  for (int i = 0; i < static_cast<int>(words.size()); i++) {
-    if (words[i].offset == anchorOffset) return i;
-  }
-  return -1;
-}
-```
-
-- [ ] **Step 5: Draw the outline from offsets**
-
-`drawSelectionOutline` must outline every word whose offset falls in
-`[min(anchorOffset, cursorOffset), max(...)]` rather than indices `[lo, hi]`.
-An anchor on an earlier page simply contributes no rects on this page.
-
-- [ ] **Step 6: Build both boards and commit**
+- [ ] **Step 4: Build both boards and commit**
 
 ```bash
-pio run -e x4pro && pio run -e default
-git commit -am "refactor(highlights): anchor a selection by offset, not page index"
+pio run -e x4pro
+pio run -e default
+git commit -am "refactor(highlights): anchor a selection by offset"
 ```
 
 ---
 
-### Task 4: turn the page mid-selection
+### Task 5: turn the page mid-selection
 
 **Files:** modify `src/activities/reader/PassageSelectActivity.{h,cpp}`, `src/activities/reader/EpubReaderActivity.cpp`
 
-- [ ] **Step 1: Give the activity the section**
+- [ ] **Step 1: Pass the section**
 
-Add `Section& section` to the constructor, stored as a reference member, and pass
-`*section` from `openHighlightPassage`. This is safe: that handler holds a live
-`section` and does not reset it, unlike the `TEXT_SETTINGS` and `SELECT_CHAPTER`
-paths (`EpubReaderActivity.cpp:790-800`).
+Add `Section& section` to the constructor and pass `*section` from
+`openHighlightPassage`. Verified safe: `ActivityManager::loop()` runs only the top
+activity (`ActivityManager.cpp:93`), so the reader's own `section.reset()` paths
+cannot fire underneath.
 
-Track the page number too:
-
-```cpp
-  uint16_t currentPageNumber;  // constructor takes section.currentPage
-```
-
-- [ ] **Step 2: Advance a page**
+- [ ] **Step 2: Advance**
 
 ```cpp
 bool PassageSelectActivity::advancePage() {
   if (phase != Phase::PickingEnd) return false;
 
-  // Deliberately NOT a `pageCount` comparison: on a partial section pageCount
-  // is a watermark, not the chapter total (Section.h:114), so comparing
-  // against it refuses valid turns into a still-building chapter. Asking for
-  // the page and treating nullptr as "no more" is correct for both cases.
   auto next = section.loadPage(currentPageNumber + 1);
-  if (!next) return false;
+  if (!next) {
+    // loadPage returns null past the build watermark, and the reader's loop --
+    // which normally advances the build -- is frozen while this activity is on
+    // top. Without this the swipe is a silent permanent dead end mid-chapter.
+    if (!section.isBuildComplete()) {
+      section.buildSomeMore(1);
+      next = section.loadPage(currentPageNumber + 1);
+    }
+    if (!next) return false;
+  }
 
   {
-    // The render task reads `page`, `words` and `committedRects`; swapping them
-    // unfenced is the same hazard the tag-deletion fix closed in 0c1c884a.
     RenderLock lock;
     page = std::move(next);
     currentPageNumber++;
     extractWords();
     rebuildCommittedRects();
     cursor = 0;
+    anchorIndex = -1;   // the anchor's page is gone; anchorOffset carries it now
+    // render() takes a differential fast path on snapshotValid (:476-482) and
+    // would paint the new outline over the OLD page's pixels.
+    snapshotValid = false;
   }
   requestUpdate();
   return true;
 }
 ```
 
-`rebuildCommittedRects()` is the existing `HighlightOverlay::buildRects` call from
-`onEnter` (`PassageSelectActivity.cpp:61-67`), extracted into a method so both
-callers share it.
+Verify `isBuildComplete()` and `buildSomeMore()` signatures in `Section.h` before
+use; if the build API differs, surface the refusal with the existing indexing
+popup rather than swallowing it.
 
 - [ ] **Step 3: Bind the gesture**
 
-In the input handler, before the word-tap branch and only while `PickingEnd`:
+Only in `PickingEnd`, before the word-tap branch:
 
 ```cpp
   if (mappedInput.wasSwipe() == MappedInputManager::SwipeDir::Left && advancePage()) return;
 ```
 
-Right-to-left is `SwipeDir::Left`. It cannot collide with Back, which is an
-**edge**-anchored left-to-right swipe (`MappedInputManager.cpp:266-271`).
+`SwipeDir::Left` is right-to-left and is already "next page" in the reader
+(`ReaderUtils.h:87-89`). Back is a left-**edge** left-to-right swipe
+(`MappedInputManager.cpp:266-271`) — no collision.
 
 - [ ] **Step 4: Build both boards and commit**
 
 ```bash
-pio run -e x4pro && pio run -e default
+pio run -e x4pro
+pio run -e default
 git commit -am "feat(highlights): extend a selection across page turns"
 ```
 
 ---
 
-### Task 5: an explicit commit row in the tag picker
+### Task 6: an explicit commit row in the tag picker
 
 **Files:** modify `src/activities/reader/TagPickerActivity.{h,cpp}`
 
-- [ ] **Step 1: One conversion, used everywhere**
+- [ ] **Step 1: `actionValue` carries the ROW, and one helper converts**
 
-Row 0 becomes "Done"; tags shift down by one. Add to the header:
+`activateIndex` and `onRowLongPress` receive `event.value`, which is the item's
+`actionValue` (`UiListActivity.cpp:31-43`) — **not** a row position. Today they
+coincide because `buildScreen` sets `actionValue = i`. With a Done row inserted
+they must carry the row, or `nav.selected` becomes a tag index and the viewport
+disagrees with the list.
 
 ```cpp
   static constexpr int DONE_ROW = 0;
-  // Row index -> index into highlightDoc.tags(), or -1 for a non-tag row.
-  // Every site that maps a row to a tag MUST go through this: the August
-  // reviews twice found bugs from an offset applied in one place and not the next.
+  // Row -> index into highlightDoc.tags(), or -1 for Done / "New tag...".
+  // EVERY row-to-tag conversion goes through this.
   int tagIndexForRow(int row) const;
 ```
 
 ```cpp
 int TagPickerActivity::tagIndexForRow(const int row) const {
   const int tagCount = static_cast<int>(highlightDoc.tags().size());
-  if (row <= DONE_ROW || row > tagCount) return -1;  // Done row, or "New tag..."
+  if (row <= DONE_ROW || row > tagCount) return -1;
   return row - 1;
 }
 ```
 
-- [ ] **Step 2: Update `listCount` and `buildScreen`**
+- [ ] **Step 2: `buildScreen`, `listCount`, `MAX_ROWS`**
 
-`listCount()` becomes `tags.size() + 2` (Done + tags + "New tag..."). In
-`buildScreen`, emit the Done row first with `label = tr(STR_DONE)`, `toggle =
-false`, then the tag rows at `rowItems_[i + 1]` with `toggleChecked =
-selected_[i]`, then "New tag..." last. `MAX_ROWS` becomes `MAX_TAGS + 2`.
+`listCount()` returns `tags.size() + 2`. `MAX_ROWS` becomes `MAX_TAGS + 2`.
+`buildScreen` emits Done first (`label = tr(STR_DONE)`, `toggle = false`,
+`actionValue = 0`), then each tag at `rowItems_[i + 1]` with
+`actionValue = i + 1` and `toggleChecked = selected_[i]`, then "New tag..." last
+with `actionValue = tagCount + 1`.
 
-- [ ] **Step 3: Route activation and long-press through the helper**
+- [ ] **Step 3: Route every consumer through the helper**
 
-`activateIndex`: `row == DONE_ROW` calls `commitAndFinish()`; the last row starts
-the new-tag flow; otherwise `toggleTag(tagIndexForRow(row))`.
+`activateIndex(row)`: `row == DONE_ROW` -> `commitAndFinish()`; `row == tagCount + 1`
+-> `startNewTagFlow()`; otherwise `toggleTag(tagIndexForRow(row))`.
 
-`onRowLongPress`: `if (tagIndexForRow(index) < 0) return;` — long-pressing Done or
-"New tag..." must not offer a delete. Then delete `tagIndexForRow(index)`.
+`onRowLongPress(row)`: `if (tagIndexForRow(row) < 0) return;` then delete
+`tagIndexForRow(row)` — long-pressing Done must not offer a delete.
+
+**`handleButtons()` (`:316-329`)** — missing from v1 entirely. Line 323 reads
+`if (selected < tagCount && ...) onRowLongPress(selected);`, comparing a row
+index against a tag count: with Done inserted, a held Confirm on Done enters the
+delete path and the last tag can never be deleted by button. Replace the guard
+with `if (tagIndexForRow(selected) >= 0 && ...)`.
+
+**Do not touch** `onEnter` (`:36-38`), `toggleTag`, `commitAndFinish` (`:216-217`),
+`showDeleteConfirmation`, `deleteTag`, or the `selected_` shift at `:274` — all are
+tag-index space already and a row offset applied there would be a second bug.
 
 - [ ] **Step 4: Correct the footer**
 
-`drawFooter` currently advertises only the discarding exit. Change the second
-label from `tr(STR_TOGGLE)` to `tr(STR_SELECT)` and keep Back as cancel, so the
-list no longer names a single exit that destroys the user's work.
+`drawFooter` (`:45-50`) advertises only the discarding exit. Change the second
+label from `tr(STR_TOGGLE)` to `tr(STR_SELECT)`. `STR_DONE` (`english.yaml:153`)
+and `STR_SELECT` (`:237`) both already exist — **no i18n regeneration.**
 
-- [ ] **Step 5: No i18n work is needed**
-
-`STR_DONE` (`english.yaml:153`) and `STR_SELECT` (`:237`) both already exist.
-Do **not** edit the translations or run `gen_i18n.py`: there is nothing to add,
-and the three generated files are gitignored.
-
-- [ ] **Step 6: Build both boards and commit**
+- [ ] **Step 5: Build both boards and commit**
 
 ```bash
-pio run -e x4pro && pio run -e default
+pio run -e x4pro
+pio run -e default
 git commit -am "fix(highlights): commit tags from an explicit Done row"
 ```
 
 ---
 
-### Task 6: verification
+### Task 7: verification
 
 - [ ] **Step 1: Full suite and both boards**
 
@@ -619,30 +739,44 @@ pio run -e x4pro
 pio run -e default
 ```
 
-Expected **231** host tests; both boards SUCCESS. Sequential `pio` runs.
+Expected **234** host tests; both SUCCESS. Sequential `pio` runs.
 
-- [ ] **Step 2: Confirm no orphans**
+- [ ] **Step 2: Greps that can actually fail**
 
 ```bash
-grep -rn "anchorIndex" src/activities/reader/PassageSelectActivity.cpp
-grep -rn "tagIndexForRow" src/activities/reader/TagPickerActivity.cpp
+grep -n "selected < tagCount" src/activities/reader/TagPickerActivity.cpp
+grep -c "tagIndexForRow" src/activities/reader/TagPickerActivity.cpp
+grep -n "snapshotValid = false" src/activities/reader/PassageSelectActivity.cpp
+grep -n "Phase::PickingStart" src/activities/reader/PassageSelectActivity.cpp
 ```
 
-The first must return **no** hits (fully replaced by `anchorOffset`); the second
-must appear in `activateIndex`, `onRowLongPress` and `buildScreen`.
+The first must return **no** hits. The second must be **>= 4** (declaration,
+`activateIndex`, `onRowLongPress`, `handleButtons`). The third must include the
+line inside `advancePage`. The fourth must still appear in `drawSelectionOutline`.
 
-- [ ] **Step 3: Regenerate the 56 imported labels**
+- [ ] **Step 3: Device self-check against stored offsets**
 
-The imported entries carry reference-only labels; new ones now carry
-`reference · passage`. Re-run the import with snippets so the list is uniform,
-and re-upload. The import is reproducible from the `.jwlibrary` backup.
+The host tests exercise the counter against fixtures; this exercises it against
+the book. Temporarily log, for the current spine item, `VerseAnchors::scan`'s
+running offset at each page boundary versus the `visibleTextOffset` the section
+cache already stores per page. They must match exactly. This is the one check
+that would have caught v1's entity and case bugs, and it uses production data.
 
-- [ ] **Step 4: Device checks** (needs the panel)
+Remove the logging before committing.
 
-1. Highlight a passage split by a page break: swipe right-to-left mid-selection, confirm on the next page, verify the saved highlight covers **both** parts.
-2. Confirm a new highlight's label reads `<book> <chapter>:<verse> · <passage>`.
-3. Pick tags, leave via **Done**, reopen the highlight — tags must persist. Then pick tags and leave via **Back** — they must not.
-4. Open a non-Bible EPUB, highlight something, confirm the label is passage text with no stray separator.
+- [ ] **Step 4: Regenerate the 56 imported labels**
+
+Imported entries carry reference-only labels; new ones carry `reference · passage`.
+Re-run the import with snippets and re-upload. Reproducible from the `.jwlibrary`
+backup.
+
+- [ ] **Step 5: Device checks**
+
+1. Highlight a passage split by a page break: swipe right-to-left mid-selection, confirm on the next page, verify the saved highlight covers **both** parts and that the page actually repaints.
+2. Confirm a new label reads `<book> <chapter>:<verse> · <passage>` and names the **right** verse — check one immediately after a verse boundary.
+3. Pick tags, leave via **Done** — tags persist. Pick tags, leave via **Back** — they do not.
+4. Hold Confirm on the Done row: nothing must be deleted.
+5. Open a non-Bible EPUB, highlight, confirm the label is passage text with no stray separator.
 
 ---
 
