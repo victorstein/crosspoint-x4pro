@@ -8,6 +8,7 @@
 #include <variant>
 
 #include "../../util/HighlightFile.h"
+#include "HighlightRowText.h"
 #include "MappedInputManager.h"
 #include "ReaderUtils.h"
 #include "TagFilterActivity.h"
@@ -90,10 +91,22 @@ void HighlightsActivity::rebuildRowItems() {
   const auto& highlights = highlightDoc_.highlights();
   for (size_t i = 0; i < visibleIndices_.size(); ++i) {
     const auto& entry = highlights[visibleIndices_[i]];
-    rowSubtitles_.push_back(tagsSubtitleFor(entry));
+    const std::string tags = tagsSubtitleFor(entry);
 
     fui::ListItem item{};
-    item.label = entry.label.empty() ? tr(STR_UNNAMED) : entry.label.c_str();
+    // Reference on its own line, passage and tags in the subtitle beneath it.
+    // Without a reference (a book with no verse anchors) the passage takes the
+    // label slot, which is exactly the two-line layout this replaced.
+    if (!entry.reference.empty()) {
+      item.label = entry.reference.c_str();
+      rowSubtitles_.push_back(HighlightRowText::composeSubtitle(entry.label, tags));
+    } else if (!entry.label.empty()) {
+      item.label = entry.label.c_str();
+      rowSubtitles_.push_back(HighlightRowText::composeSubtitle("", tags));
+    } else {
+      item.label = tr(STR_UNNAMED);
+      rowSubtitles_.push_back(HighlightRowText::composeSubtitle("", tags));
+    }
     item.subtitle = rowSubtitles_.back().c_str();
     item.actionValue = static_cast<int16_t>(i + 1);
     rowItems_.push_back(item);
@@ -465,6 +478,14 @@ void HighlightsActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   // Tap opens/cycles; long-press deletes (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
+  // Theme FIRST: Screen::list only substitutes the theme font into a style that
+  // still passes textStyleUnset (FreeInkUICore.h:550-554), and maxLines != 1
+  // fails that test. Setting maxLines alone would skip the substitution and
+  // render the subtitle in font 0.
+  props.subtitleText = screen.theme().smallText;
+  // Three, not two: at two, a passage wide enough to wrap consumes both lines
+  // and the tags are silently ellipsised away. Measured to happen in portrait.
+  props.subtitleText.maxLines = 3;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
   screen.list(props);
 }
