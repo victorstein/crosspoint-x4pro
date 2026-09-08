@@ -70,3 +70,5 @@ add_subdirectory(highlight_file)
 add_subdirectory(highlight_geometry)
 
 add_subdirectory(visible_offset)
+
+add_subdirectory(verse_anchors)
