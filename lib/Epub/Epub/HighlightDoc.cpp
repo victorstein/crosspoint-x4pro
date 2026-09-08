@@ -3,7 +3,28 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <cstring>
 #include <utility>
+
+namespace {
+
+// Labels written before the reference had its own field packed both into one
+// string as "<reference> \xc2\xb7 <passage>". Splitting here rather than in a
+// migration pass means no file rewrite is needed: the entry adopts the new
+// shape on the next ordinary save, and re-reading an already-split entry is a
+// no-op. An empty `ref` counts as absent so a partially-written file still
+// recovers.
+constexpr const char* LEGACY_LABEL_SEPARATOR = " \xc2\xb7 ";
+
+void splitLegacyLabel(HighlightEntry& entry) {
+  if (!entry.reference.empty()) return;
+  const size_t at = entry.label.find(LEGACY_LABEL_SEPARATOR);
+  if (at == std::string::npos) return;
+  entry.reference = entry.label.substr(0, at);
+  entry.label.erase(0, at + strlen(LEGACY_LABEL_SEPARATOR));
+}
+
+}  // namespace
 
 std::optional<uint16_t> HighlightDoc::addTag(const std::string& name) {
   if (name.empty() || name.size() > MAX_TAG_NAME_BYTES) return std::nullopt;
@@ -133,8 +154,11 @@ bool HighlightDoc::fromJson(JsonVariantConst doc) {
       entry.tagIndices.push_back(static_cast<uint16_t>(idx));
     }
 
-    entry.label = utf8SafeSummary(std::string(o["text"] | ""));
-    entry.reference = utf8SafeSummary(std::string(o["ref"] | ""), MAX_REFERENCE_BYTES);
+    entry.label = std::string(o["text"] | "");
+    entry.reference = std::string(o["ref"] | "");
+    splitLegacyLabel(entry);
+    entry.label = utf8SafeSummary(std::move(entry.label));
+    entry.reference = utf8SafeSummary(std::move(entry.reference), MAX_REFERENCE_BYTES);
 
     highlights.push_back(std::move(entry));
   }

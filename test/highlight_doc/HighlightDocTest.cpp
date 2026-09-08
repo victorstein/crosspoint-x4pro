@@ -400,3 +400,79 @@ TEST(HighlightDoc, TruncatesAnOverlongReferenceOnACodepointBoundary) {
   EXPECT_EQ(stored.size(), 48u);
   EXPECT_EQ(static_cast<unsigned char>(stored.back()), 0xa9u) << "cut mid-sequence";
 }
+
+namespace {
+// Parses a hand-written document, bypassing toJson, so these tests exercise
+// exactly the bytes a device wrote before `ref` existed.
+bool parseText(const char* json, HighlightDoc& out) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return false;
+  return out.fromJson(doc);
+}
+}  // namespace
+
+TEST(HighlightDocLegacy, SplitsAReferencePrefixOutOfTheLabel) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      doc));
+  ASSERT_EQ(doc.highlights().size(), 1u);
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, LeavesAnEntryThatAlreadyHasARefAlone) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"ref":"Mateo 11:19",
+          "text":"algo · con separador"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "algo \xc2\xb7 con separador");
+}
+
+TEST(HighlightDocLegacy, TreatsAnEmptyRefAsAbsentAndStillSplits) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"ref":"",
+          "text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, ALabelWithNoSeparatorBecomesPassageOnly) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"just a passage"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "");
+  EXPECT_EQ(doc.highlights()[0].label, "just a passage");
+}
+
+TEST(HighlightDocLegacy, SplitsOnTheFirstSeparatorOnly) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,
+          "text":"Mateo 11:19 · uno · dos"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "uno \xc2\xb7 dos");
+}
+
+TEST(HighlightDocLegacy, SplittingIsIdempotentAcrossASaveAndReload) {
+  HighlightDoc first;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      first));
+  HighlightDoc second;
+  ASSERT_TRUE(roundTrip(first, second));
+  EXPECT_EQ(second.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(second.highlights()[0].label, "19 Vino el Hijo");
+}
