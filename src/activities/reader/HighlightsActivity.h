@@ -99,13 +99,14 @@ class HighlightsActivity final : public UiListActivity {
   // push_back (rollback on a failed delete-save) or removeHighlight's erase
   // would invalidate out from under a held pointer.
   void rebuildVisibleIndices();
-  // Rebuilds rowSubtitles_/rowItems_ from visibleIndices_ + filterTagIndex_.
+  // Rebuilds rowTagValues_/rowItems_ from visibleIndices_ + filterTagIndex_.
   // Called only when the underlying data changes (onEnter, filter cycle,
   // delete), not on every repaint -- mirrors
   // EpubReaderBookmarksActivity::rebuildBookmarkRowItems.
   void rebuildRowItems();
   std::string computeFilterSubtitle() const;
-  std::string tagsSubtitleFor(const HighlightEntry& entry) const;
+  // Tag names for one entry, joined and capped for the row's value slot.
+  std::string tagsValueFor(const HighlightEntry& entry) const;
 
   // Pushes TagFilterActivity and applies its pick. Stepping one tag per tap
   // stopped scaling once the palette cap rose past a handful of tags.
@@ -131,7 +132,8 @@ class HighlightsActivity final : public UiListActivity {
 
   // Row 0 mirrors the filter control; rows 1.. mirror visibleIndices_.
   std::string filterSubtitle_;
-  std::vector<std::string> rowSubtitles_;
+  // Backing storage for each row's tag text; ListItem borrows a const char*.
+  std::vector<std::string> rowTagValues_;
   std::vector<freeink::ui::ListItem> rowItems_;
 
   bool confirmingDelete_ = false;

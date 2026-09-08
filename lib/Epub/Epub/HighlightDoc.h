@@ -20,10 +20,14 @@
 class HighlightDoc {
  public:
   static constexpr int FORMAT_VERSION = 1;
-  static constexpr size_t MAX_HIGHLIGHTS = 400;      // ~the spec's reachable ceiling
+  static constexpr size_t MAX_HIGHLIGHTS = 400;  // ~the spec's reachable ceiling
   static constexpr size_t MAX_TAGS = 100;
   static constexpr size_t MAX_TAGS_PER_HIGHLIGHT = 8;
   static constexpr size_t MAX_TAG_NAME_BYTES = 24;
+  // A reference is composed from a book's own table-of-contents title
+  // (PassageSelectActivity::verseReference), which is arbitrary text, so it is
+  // bounded here rather than trusted.
+  static constexpr size_t MAX_REFERENCE_BYTES = 48;
 
   const std::vector<std::string>& tags() const { return tags_; }
   const std::vector<HighlightEntry>& highlights() const { return highlights_; }

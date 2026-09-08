@@ -104,8 +104,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   return measure(text, fontId);
 }
 
-int GfxRenderer::getTextWidth(const int fontId, const char* text, EpdFontFamily::Style,
-                              BidiUtils::BidiBaseDir) const {
+int GfxRenderer::getTextWidth(const int fontId, const char* text, EpdFontFamily::Style, BidiUtils::BidiBaseDir) const {
   return measure(text, fontId);
 }
 

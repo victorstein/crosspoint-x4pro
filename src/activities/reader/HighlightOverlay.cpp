@@ -7,9 +7,9 @@
 
 namespace HighlightOverlay {
 
-std::vector<HighlightRect> buildRects(const Page& page, const std::vector<VisibleRange>& ranges,
-                                      const int marginLeft, const int marginTop, const int columnRight,
-                                      const int lineHeight, const int ascender, const int16_t gapTolerance) {
+std::vector<HighlightRect> buildRects(const Page& page, const std::vector<VisibleRange>& ranges, const int marginLeft,
+                                      const int marginTop, const int columnRight, const int lineHeight,
+                                      const int ascender, const int16_t gapTolerance) {
   if (ranges.empty()) return {};
 
   std::vector<HighlightWord> words;
@@ -33,9 +33,8 @@ std::vector<HighlightRect> buildRects(const Page& page, const std::vector<Visibl
 
     for (uint16_t i = 0; i < wordCount; i++) {
       const int16_t x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
-      const int16_t w = (i + 1 < wordCount)
-                            ? static_cast<int16_t>(block->wordXpos(i + 1) - block->wordXpos(i))
-                            : static_cast<int16_t>(std::max<int>(1, lineRight - x));
+      const int16_t w = (i + 1 < wordCount) ? static_cast<int16_t>(block->wordXpos(i + 1) - block->wordXpos(i))
+                                            : static_cast<int16_t>(std::max<int>(1, lineRight - x));
       words.push_back(HighlightWord{block->wordVisibleOffset(i), x, y, w, static_cast<int16_t>(lineHeight)});
     }
   }

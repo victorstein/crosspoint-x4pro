@@ -3,7 +3,28 @@
 #include <Utf8.h>
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
+
+namespace {
+
+// Labels written before the reference had its own field packed both into one
+// string as "<reference> \xc2\xb7 <passage>". Splitting here rather than in a
+// migration pass means no file rewrite is needed: the entry adopts the new
+// shape on the next ordinary save, and re-reading an already-split entry is a
+// no-op. An empty `ref` counts as absent so a partially-written file still
+// recovers.
+constexpr std::string_view LEGACY_LABEL_SEPARATOR = " \xc2\xb7 ";
+
+void splitLegacyLabel(HighlightEntry& entry) {
+  if (!entry.reference.empty()) return;
+  const size_t at = entry.label.find(LEGACY_LABEL_SEPARATOR);
+  if (at == std::string::npos) return;
+  entry.reference = entry.label.substr(0, at);
+  entry.label.erase(0, at + LEGACY_LABEL_SEPARATOR.size());
+}
+
+}  // namespace
 
 std::optional<uint16_t> HighlightDoc::addTag(const std::string& name) {
   if (name.empty() || name.size() > MAX_TAG_NAME_BYTES) return std::nullopt;
@@ -24,8 +45,7 @@ void HighlightDoc::removeTag(uint16_t index) {
 
   for (auto& highlight : highlights_) {
     auto& indices = highlight.tagIndices;
-    indices.erase(std::remove_if(indices.begin(), indices.end(),
-                                  [index](const uint16_t ref) { return ref == index; }),
+    indices.erase(std::remove_if(indices.begin(), indices.end(), [index](const uint16_t ref) { return ref == index; }),
                   indices.end());
     for (uint16_t& ref : indices) {
       if (ref > index) ref = static_cast<uint16_t>(ref - 1);
@@ -40,6 +60,7 @@ bool HighlightDoc::addHighlight(HighlightEntry entry) {
     entry.tagIndices.resize(MAX_TAGS_PER_HIGHLIGHT);
   }
   entry.label = utf8SafeSummary(std::move(entry.label));
+  entry.reference = utf8SafeSummary(std::move(entry.reference), MAX_REFERENCE_BYTES);
 
   highlights_.push_back(std::move(entry));
   return true;
@@ -91,6 +112,7 @@ void HighlightDoc::toJson(JsonDocument& doc) const {
       JsonArray t = o["t"].to<JsonArray>();
       for (const uint16_t idx : h.tagIndices) t.add(idx);
     }
+    if (!h.reference.empty()) o["ref"] = h.reference;
     o["text"] = h.label;
   }
 }
@@ -131,7 +153,11 @@ bool HighlightDoc::fromJson(JsonVariantConst doc) {
       entry.tagIndices.push_back(static_cast<uint16_t>(idx));
     }
 
-    entry.label = utf8SafeSummary(std::string(o["text"] | ""));
+    entry.label = std::string(o["text"] | "");
+    entry.reference = std::string(o["ref"] | "");
+    splitLegacyLabel(entry);
+    entry.label = utf8SafeSummary(std::move(entry.label));
+    entry.reference = utf8SafeSummary(std::move(entry.reference), MAX_REFERENCE_BYTES);
 
     highlights.push_back(std::move(entry));
   }

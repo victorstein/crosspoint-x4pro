@@ -7,9 +7,7 @@ TEST(PathFlatten, FlattensSeparatorsAndDropsTheExtension) {
   EXPECT_EQ(pathflatten::toCacheName("/a/b/c.txt"), "a_b_c");
 }
 
-TEST(PathFlatten, ReplacesBackslashesToo) {
-  EXPECT_EQ(pathflatten::toCacheName("/a\\b/c.epub"), "a_b_c");
-}
+TEST(PathFlatten, ReplacesBackslashesToo) { EXPECT_EQ(pathflatten::toCacheName("/a\\b/c.epub"), "a_b_c"); }
 
 TEST(PathFlatten, TruncatesAtAnyDotInThePath) {
   // Inherited: find_last_of('.') runs on the FLATTENED name, so a dot in a

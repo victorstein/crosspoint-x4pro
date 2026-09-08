@@ -94,9 +94,8 @@ void PassageSelectActivity::extractWords() {
 
     for (uint16_t i = 0; i < wordCount; i++) {
       const int16_t x = static_cast<int16_t>(line->xPos + block->wordXpos(i) + marginLeft);
-      const int16_t w = (i + 1 < wordCount)
-                            ? static_cast<int16_t>(block->wordXpos(i + 1) - block->wordXpos(i))
-                            : static_cast<int16_t>(std::max<int>(1, lineRight - x));
+      const int16_t w = (i + 1 < wordCount) ? static_cast<int16_t>(block->wordXpos(i + 1) - block->wordXpos(i))
+                                            : static_cast<int16_t>(std::max<int>(1, lineRight - x));
       WordBox box;
       box.x = x;
       box.y = y;
@@ -341,24 +340,24 @@ void PassageSelectActivity::showActionChooser(const int endIndex) {
 }
 
 void PassageSelectActivity::startTagFlow(const int endIndex) {
-  startActivityForResult(std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc, bookPath,
-                                                              saveDisabled),
-                         [this, endIndex](const ActivityResult& result) {
-                           // Cancelling the picker discards only the TAG
-                           // selection, not the highlight itself -- the
-                           // two-anchor passage was already committed before
-                           // this sub-step opened, and TagPickerActivity's
-                           // own contract (see its class comment) is that the
-                           // caller decides what "no tags chosen" means. Here
-                           // that means the same untagged save Highlight
-                           // would have produced, not discarding the work the
-                           // user already did picking two anchors.
-                           std::vector<uint16_t> tagIndices;
-                           if (!result.isCancelled) {
-                             tagIndices = std::get<TagSelectionResult>(result.data).tagIndices;
-                           }
-                           finalizeSelection(endIndex, std::move(tagIndices));
-                         });
+  startActivityForResult(
+      std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc, bookPath, saveDisabled),
+      [this, endIndex](const ActivityResult& result) {
+        // Cancelling the picker discards only the TAG
+        // selection, not the highlight itself -- the
+        // two-anchor passage was already committed before
+        // this sub-step opened, and TagPickerActivity's
+        // own contract (see its class comment) is that the
+        // caller decides what "no tags chosen" means. Here
+        // that means the same untagged save Highlight
+        // would have produced, not discarding the work the
+        // user already did picking two anchors.
+        std::vector<uint16_t> tagIndices;
+        if (!result.isCancelled) {
+          tagIndices = std::get<TagSelectionResult>(result.data).tagIndices;
+        }
+        finalizeSelection(endIndex, std::move(tagIndices));
+      });
 }
 
 void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<uint16_t> tagIndices) {
@@ -372,20 +371,10 @@ void PassageSelectActivity::finalizeSelection(const int endIndex, std::vector<ui
 
   HighlightEntry entry;
   entry.spineIndex = spineIndex;
-  const std::string reference = verseReference(range.start);
-  const std::string passage = selectionLabel(lo, hi);
-  // addHighlight truncates to 72 BYTES (Utf8.h:26-31), and the separator costs
-  // 4 of them. A long TOC title can leave no room for a useful snippet, so the
-  // reference is kept whole rather than shipping a truncated one.
-  static constexpr size_t LABEL_BUDGET = 72;
-  static constexpr size_t MIN_SNIPPET_BYTES = 16;
-  if (reference.empty()) {
-    entry.label = passage;
-  } else if (reference.size() + 4 + MIN_SNIPPET_BYTES > LABEL_BUDGET) {
-    entry.label = reference;
-  } else {
-    entry.label = reference + " \xc2\xb7 " + passage;
-  }
+  // Separate fields, so the two no longer compete for one 72-byte budget:
+  // addHighlight caps each independently.
+  entry.reference = verseReference(range.start);
+  entry.label = selectionLabel(lo, hi);
   // end is the last word's offset + 1: contains() tests a word's start offset.
   entry.range = range;
   // Truncated to MAX_TAGS_PER_HIGHLIGHT by addHighlight if ever oversized, but
@@ -576,7 +565,7 @@ void PassageSelectActivity::drawHints() const {
     return;
   }
   const auto labels = mappedInput.mapDirectionalLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT),
-                                                        tr(STR_DIR_RIGHT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+                                                       tr(STR_DIR_RIGHT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 

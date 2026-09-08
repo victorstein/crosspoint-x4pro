@@ -2,6 +2,7 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Utf8.h>
 
 #include <algorithm>
 #include <utility>
@@ -62,22 +63,25 @@ std::string HighlightsActivity::computeFilterSubtitle() const {
   return tags[*filterTagIndex_];
 }
 
-std::string HighlightsActivity::tagsSubtitleFor(const HighlightEntry& entry) const {
+std::string HighlightsActivity::tagsValueFor(const HighlightEntry& entry) const {
   if (entry.tagIndices.empty()) return std::string();
   const auto& tags = highlightDoc_.tags();
-  std::string subtitle;
+  std::string value;
   for (const uint16_t idx : entry.tagIndices) {
     if (idx >= tags.size()) continue;  // defensive; should not happen
-    if (!subtitle.empty()) subtitle += ", ";
-    subtitle += tags[idx];
+    if (!value.empty()) value += ", ";
+    value += tags[idx];
   }
-  return subtitle;
+  // list() takes the value slot's measured width out of the label's, so an
+  // unbounded tag list drives the reference's width negative and list() then
+  // skips drawing it. Matching MAX_TAG_NAME_BYTES keeps one longest tag whole.
+  return utf8SafeSummary(std::move(value), HighlightDoc::MAX_TAG_NAME_BYTES);
 }
 
 void HighlightsActivity::rebuildRowItems() {
-  rowSubtitles_.clear();
+  rowTagValues_.clear();
   rowItems_.clear();
-  rowSubtitles_.reserve(visibleIndices_.size());
+  rowTagValues_.reserve(visibleIndices_.size());
   rowItems_.reserve(visibleIndices_.size() + 1);
 
   filterSubtitle_ = computeFilterSubtitle();
@@ -90,11 +94,24 @@ void HighlightsActivity::rebuildRowItems() {
   const auto& highlights = highlightDoc_.highlights();
   for (size_t i = 0; i < visibleIndices_.size(); ++i) {
     const auto& entry = highlights[visibleIndices_[i]];
-    rowSubtitles_.push_back(tagsSubtitleFor(entry));
+    rowTagValues_.push_back(tagsValueFor(entry));
 
+    // Reference and tags share the first line, passage wraps beneath. Nothing
+    // relies on an embedded newline: GfxRenderer::wrappedText splits on spaces
+    // only, and text() draws a string narrower than the row on a single line
+    // regardless, so a '\n' here would measure as a break and never draw as one.
     fui::ListItem item{};
-    item.label = entry.label.empty() ? tr(STR_UNNAMED) : entry.label.c_str();
-    item.subtitle = rowSubtitles_.back().c_str();
+    if (!entry.reference.empty()) {
+      item.label = entry.reference.c_str();
+      // Left null when there is no passage: list() tests the pointer, not the
+      // string, so an empty one would still reserve a blank second line.
+      if (!entry.label.empty()) item.subtitle = entry.label.c_str();
+    } else {
+      // No verse anchors in this book: the passage takes the label line, which
+      // is exactly the layout this replaced.
+      item.label = entry.label.empty() ? tr(STR_UNNAMED) : entry.label.c_str();
+    }
+    if (!rowTagValues_.back().empty()) item.value = rowTagValues_.back().c_str();
     item.actionValue = static_cast<int16_t>(i + 1);
     rowItems_.push_back(item);
   }
@@ -251,9 +268,7 @@ void HighlightsActivity::editTags(const size_t docIndex) {
   startActivityForResult(
       std::make_unique<TagPickerActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_,
                                           initialSelection),
-      [this, docIndex, filterTagName](const ActivityResult& result) {
-        applyTagEdit(docIndex, filterTagName, result);
-      });
+      [this, docIndex, filterTagName](const ActivityResult& result) { applyTagEdit(docIndex, filterTagName, result); });
 }
 
 void HighlightsActivity::applyTagEdit(const size_t docIndex, const std::string& filterTagName,
@@ -465,6 +480,14 @@ void HighlightsActivity::buildScreen(UiScreen& screen) {
   props.action = ACTION_ROW;
   // Tap opens/cycles; long-press deletes (physical buttons stay in loop()).
   props.inputMask = fui::InputTouch | fui::InputLongPress;
+  // Theme FIRST: Screen::list only substitutes the theme font into a style that
+  // still passes textStyleUnset (FreeInkUICore.h:550-554), and maxLines != 1
+  // fails that test. Setting maxLines alone would skip the substitution and
+  // render the subtitle in font 0.
+  props.subtitleText = screen.theme().smallText;
+  // The passage owns the subtitle band alone, so two lines of it is the whole
+  // budget; tags sit in the value slot on the label line.
+  props.subtitleText.maxLines = 2;
   syncListViewport(screen, props, /*hasSubtitle=*/true);
   screen.list(props);
 }

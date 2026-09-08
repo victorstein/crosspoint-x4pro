@@ -273,20 +273,20 @@ void EpubReaderActivity::openReaderMenu() {
 #else
   constexpr bool hasHighlights = false;
 #endif
-  startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
-                             renderer, mappedInput, epub->getTitle(), currentPage, totalPages, bookProgressPercent,
-                             SETTINGS.orientation, !currentPageFootnotes.empty(), !cachedBookmarks.empty(),
-                             hasHighlights),
-                         [this](const ActivityResult& result) {
-                           const auto& menu = std::get<MenuResult>(result.data);
-                           if (SETTINGS.orientation != menu.orientation) {
-                             applyOrientation(menu.orientation);
-                           }
-                           toggleAutoPageTurn(menu.pageTurnOption);
-                           if (!result.isCancelled) {
-                             onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
-                           }
-                         });
+  startActivityForResult(
+      std::make_unique<EpubReaderMenuActivity>(renderer, mappedInput, epub->getTitle(), currentPage, totalPages,
+                                               bookProgressPercent, SETTINGS.orientation, !currentPageFootnotes.empty(),
+                                               !cachedBookmarks.empty(), hasHighlights),
+      [this](const ActivityResult& result) {
+        const auto& menu = std::get<MenuResult>(result.data);
+        if (SETTINGS.orientation != menu.orientation) {
+          applyOrientation(menu.orientation);
+        }
+        toggleAutoPageTurn(menu.pageTurnOption);
+        if (!result.isCancelled) {
+          onReaderMenuConfirm(static_cast<EpubReaderMenuActivity::MenuAction>(menu.action));
+        }
+      });
 }
 
 bool EpubReaderActivity::buildTickHeapGate() {
@@ -346,12 +346,11 @@ void EpubReaderActivity::openHighlightPassage() {
   // overlay rects from it on every render, so a newly saved highlight appears
   // on the next repaint with no page turn -- same pattern as
   // openDictionaryWordSelect above.
-  startActivityForResult(
-      std::make_unique<PassageSelectActivity>(renderer, mappedInput, std::move(page), orientedMarginLeft,
-                                              orientedMarginTop, columnRight, highlightDoc, epub->getPath(),
-                                              static_cast<uint16_t>(currentSpineIndex), highlightsSaveDisabled, *epub,
-                                              *section, static_cast<uint16_t>(section->currentPage)),
-      [this](const ActivityResult&) { requestUpdate(); });
+  startActivityForResult(std::make_unique<PassageSelectActivity>(
+                             renderer, mappedInput, std::move(page), orientedMarginLeft, orientedMarginTop, columnRight,
+                             highlightDoc, epub->getPath(), static_cast<uint16_t>(currentSpineIndex),
+                             highlightsSaveDisabled, *epub, *section, static_cast<uint16_t>(section->currentPage)),
+                         [this](const ActivityResult&) { requestUpdate(); });
 }
 
 void EpubReaderActivity::openHighlights() {
@@ -1549,9 +1548,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // without a fixed pixel value that would either under-merge at large font
   // sizes or bridge a paragraph indent at small ones (see HighlightGeometry.h).
   const int16_t highlightGapTolerance = static_cast<int16_t>(highlightLineHeight / 4);
-  const std::vector<HighlightRect> highlightRectsForPage = HighlightOverlay::buildRects(
-      *page, highlightRanges, orientedMarginLeft, orientedMarginTop, highlightColumnRight, highlightLineHeight,
-      highlightAscender, highlightGapTolerance);
+  const std::vector<HighlightRect> highlightRectsForPage =
+      HighlightOverlay::buildRects(*page, highlightRanges, orientedMarginLeft, orientedMarginTop, highlightColumnRight,
+                                   highlightLineHeight, highlightAscender, highlightGapTolerance);
 
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
   for (const auto& rect : highlightRectsForPage) {

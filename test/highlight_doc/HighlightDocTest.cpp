@@ -1,6 +1,5 @@
-#include <gtest/gtest.h>
-
 #include <ArduinoJson.h>
+#include <gtest/gtest.h>
 
 #include "Epub/HighlightDoc.h"
 
@@ -171,8 +170,7 @@ TEST(HighlightDoc, WorstCaseDocumentStaysUnderTheSaveBudget) {
   // references per entry, and a label made entirely of characters JSON escapes.
   HighlightDoc doc;
   for (size_t t = 0; t < HighlightDoc::MAX_TAGS; ++t) {
-    ASSERT_TRUE(doc.addTag(std::string(HighlightDoc::MAX_TAG_NAME_BYTES, 'a' + static_cast<char>(t % 26)))
-                    .has_value());
+    ASSERT_TRUE(doc.addTag(std::string(HighlightDoc::MAX_TAG_NAME_BYTES, 'a' + static_cast<char>(t % 26))).has_value());
   }
   std::vector<uint16_t> refs;
   for (size_t i = 0; i < HighlightDoc::MAX_TAGS_PER_HIGHLIGHT; ++i) refs.push_back(static_cast<uint16_t>(i));
@@ -361,4 +359,131 @@ TEST(HighlightDocSetTags, SurvivesARoundTrip) {
   ASSERT_EQ(parsed.highlights().size(), 1u) << "the entry itself must survive the round trip";
   ASSERT_EQ(parsed.highlights()[0].tagIndices.size(), 1u);
   EXPECT_EQ(parsed.tags()[parsed.highlights()[0].tagIndices[0]], "beta");
+}
+
+TEST(HighlightDoc, RoundTripsAReference) {
+  HighlightDoc doc;
+  HighlightEntry e = makeEntry(3, 100, 200);
+  e.reference = "Apocalipsis 1:8";
+  e.label = "8 Yo soy el Alfa";
+  doc.addHighlight(std::move(e));
+
+  HighlightDoc parsed;
+  ASSERT_TRUE(roundTrip(doc, parsed));
+  ASSERT_EQ(parsed.highlights().size(), 1u);
+  EXPECT_EQ(parsed.highlights()[0].reference, "Apocalipsis 1:8");
+  EXPECT_EQ(parsed.highlights()[0].label, "8 Yo soy el Alfa");
+}
+
+TEST(HighlightDoc, OmitsTheRefKeyWhenTheReferenceIsEmpty) {
+  HighlightDoc doc;
+  doc.addHighlight(makeEntry(0, 0, 10));
+
+  JsonDocument json;
+  doc.toJson(json);
+  std::string text;
+  serializeJson(json, text);
+  EXPECT_EQ(text.find("\"ref\""), std::string::npos) << text;
+}
+
+TEST(HighlightDoc, TruncatesAnOverlongReferenceWithoutSplittingASequence) {
+  HighlightDoc doc;
+  HighlightEntry e = makeEntry(0, 0, 10);
+  // 1 ASCII + 30 two-byte codepoints = 61 bytes. The leading byte puts every
+  // sequence at an odd offset, so the one spanning bytes 47-48 straddles the
+  // 48-byte cap: a naive resize(48) would leave its lead byte orphaned. An
+  // aligned fixture would pass against that bug, which is why this one is not.
+  e.reference = "x";
+  for (int i = 0; i < 30; ++i) e.reference += "\xc3\xa9";
+  doc.addHighlight(std::move(e));
+
+  EXPECT_EQ(doc.highlights()[0].reference.size(), 47u);
+}
+
+namespace {
+// Parses a hand-written document, bypassing toJson, so these tests exercise
+// exactly the bytes a device wrote before `ref` existed.
+bool parseText(const char* json, HighlightDoc& out) {
+  JsonDocument doc;
+  if (deserializeJson(doc, json)) return false;
+  return out.fromJson(doc);
+}
+}  // namespace
+
+TEST(HighlightDocLegacy, SplitsAReferencePrefixOutOfTheLabel) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      doc));
+  ASSERT_EQ(doc.highlights().size(), 1u);
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, LeavesAnEntryThatAlreadyHasARefAlone) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"ref":"Mateo 11:19",
+          "text":"algo · con separador"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "algo \xc2\xb7 con separador");
+}
+
+TEST(HighlightDocLegacy, TreatsAnEmptyRefAsAbsentAndStillSplits) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"ref":"",
+          "text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, ALabelWithNoSeparatorBecomesPassageOnly) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"just a passage"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "");
+  EXPECT_EQ(doc.highlights()[0].label, "just a passage");
+}
+
+TEST(HighlightDocLegacy, SplitsOnTheFirstSeparatorOnly) {
+  HighlightDoc doc;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,
+          "text":"Mateo 11:19 · uno · dos"}]})",
+      doc));
+  EXPECT_EQ(doc.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(doc.highlights()[0].label, "uno \xc2\xb7 dos");
+}
+
+TEST(HighlightDocLegacy, SplittingIsIdempotentAcrossASaveAndReload) {
+  HighlightDoc first;
+  ASSERT_TRUE(parseText(
+      R"({"v":1,"tags":[],"highlights":[
+         {"si":3,"start":100,"end":200,"text":"Mateo 11:19 · 19 Vino el Hijo"}]})",
+      first));
+  HighlightDoc second;
+  ASSERT_TRUE(roundTrip(first, second));
+  EXPECT_EQ(second.highlights()[0].reference, "Mateo 11:19");
+  EXPECT_EQ(second.highlights()[0].label, "19 Vino el Hijo");
+}
+
+TEST(HighlightDocLegacy, CapsAReferenceThatIsOverlongAfterTheSplit) {
+  // The split runs before the caps, so a legacy label can yield a reference
+  // longer than MAX_REFERENCE_BYTES. Guards that ordering: capping first would
+  // let the reference escape its bound entirely.
+  HighlightDoc doc;
+  const std::string json = R"({"v":1,"tags":[],"highlights":[{"si":0,"start":0,"end":1,"text":")" +
+                           std::string(60, 'R') + " \xc2\xb7 passage\"}]}";
+  ASSERT_TRUE(parseText(json.c_str(), doc));
+  EXPECT_EQ(doc.highlights()[0].reference.size(), HighlightDoc::MAX_REFERENCE_BYTES);
+  EXPECT_EQ(doc.highlights()[0].label, "passage");
 }

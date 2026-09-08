@@ -25,14 +25,14 @@
 // second-guess a file that may still hold the user's data.
 enum class HighlightLoadAction : uint8_t {
   UseLoaded,              // primary parsed -- use it
-  ReportEmpty,             // genuinely nothing on disk
-  PromoteTempAndUseIt,      // .tmp is the only surviving copy; rescue it now
-  DeleteTempReportEmpty,   // .tmp exists but is unusable; discard it
-  ReportFailed,             // primary bytes exist but could not be read/parsed
+  ReportEmpty,            // genuinely nothing on disk
+  PromoteTempAndUseIt,    // .tmp is the only surviving copy; rescue it now
+  DeleteTempReportEmpty,  // .tmp exists but is unusable; discard it
+  ReportFailed,           // primary bytes exist but could not be read/parsed
 };
 
 constexpr HighlightLoadAction highlightLoadAction(const DocReadStatus primary, const bool tempExists,
-                                                   const bool tempParsed) {
+                                                  const bool tempParsed) {
   switch (primary) {
     case DocReadStatus::Ok:
       return HighlightLoadAction::UseLoaded;

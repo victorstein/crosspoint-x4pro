@@ -45,8 +45,8 @@ class Scanner {
   std::vector<VerseAnchor> take();
 
  private:
-  void* parser_ = nullptr;   // XML_Parser; opaque here to keep expat out of the header
-  void* state_ = nullptr;    // State
+  void* parser_ = nullptr;  // XML_Parser; opaque here to keep expat out of the header
+  void* state_ = nullptr;   // State
   bool failed_ = false;
 };
 
