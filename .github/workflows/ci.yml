@@ -2,7 +2,11 @@ name: CI (build)
 
 on:
   push:
-    branches: [master]
+    # This fork's default branch is `main`; upstream's is `master`. Left as
+    # `master` these jobs never ran on a push here, so nothing merged without a
+    # pull request was ever checked -- the formatting gate first ran on PR #1
+    # and found 25 stale files.
+    branches: [main]
   pull_request:
 
 permissions:
