@@ -21,7 +21,7 @@ class HighlightDoc {
  public:
   static constexpr int FORMAT_VERSION = 1;
   static constexpr size_t MAX_HIGHLIGHTS = 400;      // ~the spec's reachable ceiling
-  static constexpr size_t MAX_TAGS = 32;
+  static constexpr size_t MAX_TAGS = 100;
   static constexpr size_t MAX_TAGS_PER_HIGHLIGHT = 8;
   static constexpr size_t MAX_TAG_NAME_BYTES = 24;
 
