@@ -104,25 +104,40 @@ void HighlightsActivity::openTagFilter() {
   if (highlightDoc_.tags().empty()) return;  // nothing to filter by; stays on "All"
 
   app.clearTapFlash();
-  startActivityForResult(std::make_unique<TagFilterActivity>(renderer, mappedInput, highlightDoc_),
-                         [this](const ActivityResult& result) {
-                           // Cancelled leaves the current filter alone, matching the
-                           // Back-from-picker behaviour everywhere else in this screen.
-                           // Guarded on the alternative, not just isCancelled: any
-                           // finish() that forgets to set a result leaves monostate
-                           // here, and std::get on the wrong alternative aborts under
-                           // -fno-exceptions.
-                           if (result.isCancelled || !std::holds_alternative<TagSelectionResult>(result.data)) return;
-                           const auto& selection = std::get<TagSelectionResult>(result.data);
-                           if (selection.tagIndices.empty()) {
-                             filterTagIndex_.reset();
-                           } else if (selection.tagIndices.front() < highlightDoc_.tags().size()) {
-                             filterTagIndex_ = selection.tagIndices.front();
-                           }
-                           rebuildVisibleIndices();
-                           rebuildRowItems();
-                           moveSelectionTo(0);
-                         });
+  // Captured BEFORE the push: the filter screen can delete a tag, and removeTag
+  // renumbers every index in place, so an index held across the push can name a
+  // different tag on return (1210b1d4). The name is what survives.
+  const std::string activeTagName = filterTagIndex_ ? highlightDoc_.tags()[*filterTagIndex_] : std::string();
+  startActivityForResult(
+      std::make_unique<TagFilterActivity>(renderer, mappedInput, highlightDoc_, bookPath_, saveDisabled_),
+      [this, activeTagName](const ActivityResult& result) {
+        // Guarded on the alternative, not just isCancelled: any finish() that
+        // forgets to set a result leaves monostate here, and std::get on the
+        // wrong alternative aborts under -fno-exceptions.
+        if (!result.isCancelled && std::holds_alternative<TagSelectionResult>(result.data)) {
+          const auto& selection = std::get<TagSelectionResult>(result.data);
+          if (selection.tagIndices.empty()) {
+            filterTagIndex_.reset();
+          } else if (selection.tagIndices.front() < highlightDoc_.tags().size()) {
+            filterTagIndex_ = selection.tagIndices.front();
+          }
+        } else if (filterTagIndex_) {
+          // Cancelled, but a delete may still have happened before Back. Re-resolve
+          // the active filter by name; it is gone if the name is gone.
+          const auto& tags = highlightDoc_.tags();
+          const auto it = std::find(tags.begin(), tags.end(), activeTagName);
+          if (it == tags.end()) {
+            filterTagIndex_.reset();
+          } else {
+            filterTagIndex_ = static_cast<uint16_t>(std::distance(tags.begin(), it));
+          }
+        }
+        // Always rebuilt, including on cancel: a deletion changes the rows and
+        // the labels they borrow even when the filter itself is untouched.
+        rebuildVisibleIndices();
+        rebuildRowItems();
+        moveSelectionTo(0);
+      });
 }
 
 void HighlightsActivity::jumpToHighlight(const size_t docIndex) {

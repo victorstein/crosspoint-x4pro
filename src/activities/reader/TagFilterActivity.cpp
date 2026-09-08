@@ -5,14 +5,19 @@
 
 #include "MappedInputManager.h"
 #include "activities/ActivityResult.h"
+#include "../../util/HighlightFile.h"
+#include "ReaderUtils.h"
+#include "TagRowMapping.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 TagFilterActivity::TagFilterActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                                     const HighlightDoc& highlightDoc)
-    : UiListActivity("TagFilter", renderer, mappedInput, /*wantsTouchLongPress=*/false),
-      highlightDoc_(highlightDoc) {}
+                                     HighlightDoc& highlightDoc, std::string bookPath, const bool saveDisabled)
+    : UiListActivity("TagFilter", renderer, mappedInput, /*wantsTouchLongPress=*/true),
+      highlightDoc_(highlightDoc),
+      bookPath_(std::move(bookPath)),
+      saveDisabled_(saveDisabled) {}
 
 int TagFilterActivity::listCount() const { return static_cast<int>(highlightDoc_.tags().size()) + 1; }
 
@@ -56,7 +61,7 @@ void TagFilterActivity::buildScreen(UiScreen& screen) {
   props.items = rowItems_.data();
   props.count = static_cast<uint16_t>(rowItems_.size());
   props.action = ACTION_ROW;
-  props.inputMask = fui::InputTouch;
+  props.inputMask = fui::InputTouch | fui::InputLongPress;
   syncListViewport(screen, props);
   screen.list(props);
 }
@@ -73,6 +78,93 @@ bool TagFilterActivity::handleHomeGesture() {
   // abandon the reader entirely from a filter screen. Cancelling matches Back.
   onBackButton();
   return true;
+}
+
+void TagFilterActivity::onRowLongPress(const int row) {
+  if (confirmPopup_.isActive()) return;
+  // Row 0 is "all tags" and maps to no palette entry. TagRows is the same
+  // conversion the picker uses and is host-tested.
+  const int tagIndex = TagRows::tagIndexForRow(row, static_cast<int>(highlightDoc_.tags().size()));
+  if (tagIndex < 0) return;
+  app.clearTapFlash();
+  nav.selected = row;
+  showDeleteConfirmation(static_cast<size_t>(tagIndex));
+}
+
+void TagFilterActivity::showDeleteConfirmation(const size_t tagIndex) {
+  if (confirmPopup_.isActive()) return;
+  if (saveDisabled_) {
+    // The file may still hold the user's data; never let a destructive palette
+    // change through in that state, matching the picker's own bail.
+    ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_LOAD_FAILED));
+    requestUpdate();
+    return;
+  }
+
+  pendingDeleteIndex_ = tagIndex;
+  confirmingDelete_ = true;
+  const char* options[] = {tr(STR_CANCEL), tr(STR_DELETE)};
+  confirmPopup_.show(tr(STR_CONFIRM_DELETE_TAG), options, 2, 0, [this](const int idx) {
+    confirmingDelete_ = false;
+    if (idx == 1) deleteTag(pendingDeleteIndex_);
+    requestUpdate();
+  });
+  requestUpdate();
+}
+
+void TagFilterActivity::deleteTag(const size_t tagIndex) {
+  if (tagIndex >= highlightDoc_.tags().size()) return;  // stale index; nothing to do
+
+  {
+    // rowItems_ borrows label pointers from the palette's std::string buffers
+    // and is rebuilt inline in buildScreen, so the mutation itself must be
+    // fenced against the render task -- same reasoning as the picker's delete.
+    RenderLock lock(*this);
+    highlightDoc_.removeTag(static_cast<uint16_t>(tagIndex));
+  }
+  requestUpdate();
+
+  // SD write once the lock is released: save is read-only on the document.
+  switch (HighlightFile::save(bookPath_, highlightDoc_)) {
+    case HighlightFile::SaveResult::Ok:
+      break;
+    case HighlightFile::SaveResult::TooLarge:
+      ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_TOO_LARGE));
+      break;
+    case HighlightFile::SaveResult::WriteFailed:
+      ReaderUtils::showMessage(renderer, tr(STR_HIGHLIGHTS_SAVE_FAILED));
+      break;
+  }
+}
+
+bool TagFilterActivity::handleCustomInput() {
+  if (confirmPopup_.handleInput(mappedInput, [this] { requestUpdate(); })) return true;
+  if (confirmingDelete_) {
+    // Popup dismissed without choosing (Back, or a tap outside it): drop the
+    // pending delete and stay here.
+    confirmingDelete_ = false;
+    requestUpdate();
+    return true;
+  }
+  return false;
+}
+
+void TagFilterActivity::render(RenderLock&&) {
+  // Mirrors UiListActivity::render()'s body with the confirmation interleaved
+  // between the app render and the footer; the base render has no seam for it.
+  renderer.clearScreen();
+  drawChrome();
+  renderUi();
+  for (int pass = 0; nav.consumeRebuildNeeded() && pass < 8; ++pass) {
+    renderer.clearScreen();
+    drawChrome();
+    renderUi();
+  }
+
+  if (confirmPopup_.processRender(renderer, mappedInput)) return;
+
+  drawFooter();
+  renderer.displayBuffer();
 }
 
 void TagFilterActivity::activateIndex(const int index) {
