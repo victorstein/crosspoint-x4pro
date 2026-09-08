@@ -74,3 +74,4 @@ add_subdirectory(visible_offset)
 add_subdirectory(verse_anchors)
 
 add_subdirectory(tag_rows)
+add_subdirectory(highlight_row_text)
