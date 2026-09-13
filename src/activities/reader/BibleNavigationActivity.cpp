@@ -1,10 +1,8 @@
 #include "BibleNavigationActivity.h"
 
 #include <Epub/BibleNavScanner.h>
-#include <Epub/Section.h>
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
-#include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -15,14 +13,13 @@
 #include <cstring>
 
 #include "MappedInputManager.h"
+#include "SpineHtmlStream.h"
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 
 namespace fui = freeink::ui;
 
 namespace {
-
-constexpr size_t HTML_CHUNK_BYTES = 2048;
 
 // Longest row label at the chapter and verse levels is "176".
 constexpr int NUMBER_LABEL_BYTES = 8;
@@ -65,72 +62,6 @@ void BibleNavigationActivity::onEnter() {
   }
 }
 
-// One forward pass over the inflated XHTML of `spineIndex`, feeding it to
-// `sink` in bounded chunks. Going through Section rather than re-inflating from
-// the zip means the chapter the user is about to open keeps the HTML cache this
-// produced, so opening it does not pay the inflate twice.
-bool BibleNavigationActivity::streamSpineHtml(const int spineIndex, const ChunkSink sink, void* ctx) {
-  if (!epub || spineIndex < 0) return false;
-
-  Section section(epub, spineIndex, renderer);
-  std::string parsePath;
-  bool promoted = true;
-  std::string tmpHtmlPath;
-
-  if (section.hasHtmlCache()) {
-    parsePath = section.htmlCachePath();
-  } else {
-    const size_t spineBytes = epub->getCumulativeSpineItemSize(spineIndex) -
-                              (spineIndex > 0 ? epub->getCumulativeSpineItemSize(spineIndex - 1) : 0);
-    bool inflated;
-    {
-      RenderLock lock;
-      // drawPopup refreshes the display itself, so it has to land before the
-      // loan hands the framebuffer to the inflate's window.
-      if (spineBytes > INFLATE_POPUP_BYTE_THRESHOLD) GUI.drawPopup(renderer, tr(STR_INDEXING));
-      GfxRenderer::FrameBufferLoan loan(renderer);
-      inflated = section.ensureHtmlCache(parsePath, promoted, tmpHtmlPath);
-      loan.end();
-    }
-    if (!inflated) {
-      LOG_ERR("BNV", "Failed to inflate spine %d", spineIndex);
-      return false;
-    }
-  }
-
-  auto buffer = makeUniqueNoThrow<char[]>(HTML_CHUNK_BYTES);
-  if (!buffer) {
-    LOG_ERR("BNV", "OOM: %d bytes", static_cast<int>(HTML_CHUNK_BYTES));
-    if (!promoted) Storage.remove(tmpHtmlPath.c_str());
-    return false;
-  }
-
-  bool ok = false;
-  {
-    HalFile file;
-    if (Storage.openFileForRead("BNV", parsePath, file)) {
-      ok = true;
-      size_t remaining = file.size();
-      // An empty file still has to close the parse, or the scanner reports no
-      // failure and hands back a silently empty list.
-      if (remaining == 0) ok = sink(ctx, "", 0, true);
-      while (ok && remaining > 0) {
-        const size_t want = remaining < HTML_CHUNK_BYTES ? remaining : HTML_CHUNK_BYTES;
-        const int got = file.read(buffer.get(), want);
-        if (got <= 0) {
-          ok = false;
-          break;
-        }
-        remaining -= static_cast<size_t>(got);
-        ok = sink(ctx, buffer.get(), static_cast<size_t>(got), remaining == 0);
-      }
-    }
-  }
-  // Only an un-promoted temp is ours; the promoted cache belongs to Section.
-  if (!promoted) Storage.remove(tmpHtmlPath.c_str());
-  return ok;
-}
-
 bool BibleNavigationActivity::loadBooks() {
   bookCount = 0;
   if (!epub) return false;
@@ -140,7 +71,8 @@ bool BibleNavigationActivity::loadBooks() {
     LOG_ERR("BNV", "OOM: nav scanner");
     return false;
   }
-  if (!streamSpineHtml(epub->getBibleBookNavSpineIndex(), feedNavScanner, &scanner)) return false;
+  if (!SpineHtmlStream::stream(epub, epub->getBibleBookNavSpineIndex(), renderer, feedNavScanner, &scanner))
+    return false;
 
   std::vector<std::string> targets = scanner.take();
   if (targets.empty()) return false;
@@ -180,7 +112,7 @@ bool BibleNavigationActivity::loadChapters(const int bookIndex) {
     LOG_ERR("BNV", "OOM: nav scanner");
     return false;
   }
-  if (!streamSpineHtml(bookTargetSpine[bookIndex], feedNavScanner, &scanner)) return false;
+  if (!SpineHtmlStream::stream(epub, bookTargetSpine[bookIndex], renderer, feedNavScanner, &scanner)) return false;
 
   std::vector<std::string> targets = scanner.take();
   BibleNav::dropBookNavLinks(targets);
@@ -210,7 +142,7 @@ bool BibleNavigationActivity::loadVerses(const int spineIndex) {
     LOG_ERR("BNV", "OOM: verse scanner");
     return false;
   }
-  if (!streamSpineHtml(spineIndex, feedVerseScanner, &scanner)) return false;
+  if (!SpineHtmlStream::stream(epub, spineIndex, renderer, feedVerseScanner, &scanner)) return false;
 
   verseAnchors = scanner.take();
   return !verseAnchors.empty();
@@ -416,6 +348,15 @@ void BibleNavigationActivity::buildScreen(UiScreen& screen) {
     return;
   }
 
+  // The long-press is the only way into the verse list and touch hardware has
+  // no button-hint band to advertise it in, so the chapter list says so itself.
+  if (level == Level::Chapter && mappedInput.hasTouch()) {
+    fui::TextStyle hint = screen.theme().bodyText;
+    hint.align = fui::TextAlign::Center;
+    const int16_t lineHeight = screen.target().lineHeight(hint.font);
+    screen.target().text(screen.takeTop(lineHeight, metrics.verticalSpacing), tr(STR_HOLD_FOR_VERSES), hint);
+  }
+
   fui::ListProps props;
   props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
@@ -440,4 +381,14 @@ void BibleNavigationActivity::drawChrome() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   GUI.drawHeader(renderer, Rect{safe.x, safe.y + metrics.topPadding, safe.width, metrics.headerHeight}, title);
+}
+
+void BibleNavigationActivity::drawFooter() {
+  // Holding Confirm on a chapter row is the only route to the verse list, so
+  // the hint belongs on the button that carries the gesture. Touch boards draw
+  // no hint band at all (buttonHintsHeight is 0 there) and get the same hint as
+  // a line above the list instead -- see buildScreen.
+  const char* confirmLabel = level == Level::Chapter ? tr(STR_HOLD_FOR_VERSES) : tr(STR_SELECT);
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }

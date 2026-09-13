@@ -85,3 +85,4 @@ add_subdirectory(pub_media_json)
 
 add_subdirectory(bible_nav_scanner)
 add_subdirectory(bible_book_join)
+add_subdirectory(bible_chapter_number)

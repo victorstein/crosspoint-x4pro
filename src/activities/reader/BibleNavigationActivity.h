@@ -2,7 +2,6 @@
 #include <Epub.h>
 #include <Epub/VerseAnchors.h>
 
-#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -40,15 +39,6 @@ class BibleNavigationActivity final : public UiListActivity {
   static constexpr int ROW_WINDOW = 24;
   // A held Confirm release opens the verse list, as in HighlightsActivity.
   static constexpr int OPEN_VERSE_LIST_MS = 700;
-  // Above this an inflate is slow enough to want the indexing popup. Nav pages
-  // top out around 14 KB and never reach it; a long chapter (Psalm 119 at
-  // ~69 KB) does.
-  static constexpr size_t INFLATE_POPUP_BYTE_THRESHOLD = 32 * 1024;
-
-  // Chunk sink for streamSpineHtml. A function pointer rather than
-  // std::function: the latter heap-allocates its closure and costs KBs of
-  // binary per signature.
-  using ChunkSink = bool (*)(void* ctx, const char* chunk, size_t length, bool isFinal);
 
   std::shared_ptr<Epub> epub;
   Level level = Level::Book;
@@ -80,7 +70,6 @@ class BibleNavigationActivity final : public UiListActivity {
   int windowCount = 0;
   void refreshRowWindow(int start);
 
-  bool streamSpineHtml(int spineIndex, ChunkSink sink, void* ctx);
   bool loadBooks();
   bool loadChapters(int bookIndex);
   bool loadVerses(int spineIndex);
@@ -99,4 +88,7 @@ class BibleNavigationActivity final : public UiListActivity {
   void onBackButton() override;
   // Header is drawn inside the safe area (not full-width like the base).
   void drawChrome() override;
+  // Chapter level names the hold gesture on the Confirm hint; the other levels
+  // keep the plain Select label.
+  void drawFooter() override;
 };

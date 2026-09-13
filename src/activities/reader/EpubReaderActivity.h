@@ -72,6 +72,14 @@ class EpubReaderActivity final : public ReaderActivity {
   uint16_t buildViewportHeight = 0;
   bool partialRebuildStartFailed = false;
 
+  // A Bible's TOC names only the book -- the chapter is the spine item, and its
+  // number lives solely in the file's verse markers. Resolved once per section
+  // change and kept with the spine it was read from; -1 means unknown, which is
+  // also every non-Bible book.
+  int bibleChapterNumber = -1;
+  int bibleChapterNumberSpine = -1;
+  void resolveBibleChapterNumber();
+
   int lastSavedSpineIndex = -1;
   int lastSavedPage = -1;
   int lastSavedPageCount = -1;

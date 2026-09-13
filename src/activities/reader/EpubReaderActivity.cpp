@@ -1,5 +1,6 @@
 #include "EpubReaderActivity.h"
 
+#include <Epub/BibleChapterNumber.h>
 #include <Epub/HighlightGeometry.h>
 #include <Epub/Page.h>
 #include <Epub/VisibleRange.h>
@@ -43,6 +44,7 @@
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "SpineHtmlStream.h"
 #include "activities/settings/TextSettingsActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -62,6 +64,13 @@ int clampPercent(int percent) {
     return 100;
   }
   return percent;
+}
+
+// Stops the pass at the first verse marker: it sits near the top of a chapter
+// file that runs to 69 KB, and every marker in the file names the same chapter.
+bool feedChapterNumberReader(void* ctx, const char* chunk, const size_t length, const bool isFinal) {
+  auto* reader = static_cast<BibleChapterNumber::Reader*>(ctx);
+  return reader->feed(chunk, length, isFinal) && !reader->resolved();
 }
 
 constexpr char READ_FOLDER[] = "/read";
@@ -1259,6 +1268,8 @@ void EpubReaderActivity::renderBook() {
       section->currentPage = newPage;
       pendingPercentJump = false;
     }
+
+    resolveBibleChapterNumber();
   }
 
   if (section->isPartial() && section->currentPage >= static_cast<int>(section->pageCount)) {
@@ -1689,6 +1700,26 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   }
 }
 
+void EpubReaderActivity::resolveBibleChapterNumber() {
+  if (bibleChapterNumberSpine == currentSpineIndex) return;
+  bibleChapterNumberSpine = currentSpineIndex;
+  bibleChapterNumber = -1;
+
+  // One cached int comparison for every non-Bible book, which never opens a file.
+  if (!epub || epub->getBibleBookNavSpineIndex() < 0) return;
+
+  BibleChapterNumber::Reader reader;
+  // WhenMissing::Fail on two counts: renderBook runs under the render lock, and
+  // a status-bar label is never worth an inflate of its own. The build above
+  // leaves the HTML cached whenever it had to read the chapter at all; when a
+  // finished layout cache meant it never did, the number stays unknown.
+  // The early stop reports as a sink failure, so the number -- not the return
+  // value -- is the result.
+  SpineHtmlStream::stream(epub, currentSpineIndex, renderer, feedChapterNumberReader, &reader,
+                          SpineHtmlStream::WhenMissing::Fail);
+  bibleChapterNumber = reader.chapter();
+}
+
 void EpubReaderActivity::renderStatusBar() const {
   const int currentPage = section ? section->currentPage + 1 : 1;
   const float pageCount = section ? section->estimatedTotalPages() : 1;
@@ -1712,6 +1743,11 @@ void EpubReaderActivity::renderStatusBar() const {
       if (tocIndex != -1) {
         const auto tocItem = epub->getTocItem(tocIndex);
         title = tocItem.title;
+        // A Bible's covering TOC entry is the book, so the chapter the reader
+        // is actually in has to be appended: "Exodo" -> "Exodo 5".
+        if (bibleChapterNumber > 0 && bibleChapterNumberSpine == currentSpineIndex) {
+          title += ' ' + std::to_string(bibleChapterNumber);
+        }
       }
     }
   } else if (sb.titleMode == CrossPointSettings::STATUS_BAR_TITLE::BOOK_TITLE) {
