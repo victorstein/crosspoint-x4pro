@@ -31,8 +31,7 @@ struct Geometry {
 // Columns follow the width, then rows are clamped so cols*rows stays within
 // MAX_CELLS. Clamping rows rather than cols keeps the column count the width
 // earned, so cells stay square-ish.
-inline Geometry geometryFor(const int contentW, const int contentH, const int minCell = MIN_CELL,
-                            const int gap = GAP) {
+inline Geometry geometryFor(const int contentW, const int contentH, const int minCell = MIN_CELL, const int gap = GAP) {
   const int stride = minCell + gap;
   const int fitCols = contentW > 0 ? (contentW + gap) / stride : 0;
   const int cols = std::clamp(fitCols, MIN_COLS, MAX_COLS);

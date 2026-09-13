@@ -86,9 +86,7 @@ TEST(NumberGridGeometry, CellSizeBoundsTheTouchTargetFloor) {
   EXPECT_GT(cell, 0);
 }
 
-TEST(NumberGridPaging, Psalm119TakesFourPages) {
-  EXPECT_EQ(NumberGrid::pageCount(PSALM_119_VERSES, 48), 4);
-}
+TEST(NumberGridPaging, Psalm119TakesFourPages) { EXPECT_EQ(NumberGrid::pageCount(PSALM_119_VERSES, 48), 4); }
 
 TEST(NumberGridPaging, LastPageIsPartlyPadded) {
   const int lastPageFirst = NumberGrid::pageFirstCell(3, 48);
