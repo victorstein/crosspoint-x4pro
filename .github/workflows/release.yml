@@ -3,12 +3,15 @@ name: Compile Release
 # Builds every board's release firmware on tag push, with the .bin named
 # exactly as OtaUpdater requests it from the GitHub release: plain
 # firmware.bin for the C3 X4/X3 binary, firmware-<board>.bin for every other
-# board. Attach the artifacts' .bin files to the release as-is.
+# board, then publishes them as the release assets OTA downloads.
 
+# Bare semver only. Upstream tags inherited by a fork (1.6.0rc, v1.5.0, ...) name
+# commits without this fork's features, and publishing one would make every fork
+# device update itself onto upstream firmware.
 on:
   push:
     tags:
-      - '*'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: read
@@ -81,3 +84,29 @@ jobs:
             .pio/build/${{ matrix.pio_env }}/firmware.elf
             .pio/build/${{ matrix.pio_env }}/firmware.map
             .pio/build/${{ matrix.pio_env }}/partitions.bin
+
+  publish-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    # Only this fork publishes; a downstream fork of it builds but stays silent.
+    if: github.repository == 'victorstein/crosspoint-x4pro'
+    permissions:
+      # A job-level block replaces the workflow's top-level `contents: read`.
+      contents: write
+    steps:
+      - name: Download board artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # One directory per artifact. merge-multiple would collide: every board
+          # ships its own bootloader.bin and partitions.bin under the same name.
+          path: dist
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # All four boards are attached, not just one: the device picks the asset
+          # name from its own board tag, so a missing board finds nothing to update
+          # from. The upload fallback keeps a re-run or a moved tag idempotent.
+          gh release create "$GITHUB_REF_NAME" --generate-notes dist/*/firmware*.bin \
+            || gh release upload "$GITHUB_REF_NAME" dist/*/firmware*.bin --clobber

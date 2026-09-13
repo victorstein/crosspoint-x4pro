@@ -17,9 +17,16 @@
 
 #include "FirmwareBoardTag.h"
 #include "FirmwareFlasher.h"
+#include "OtaVersion.h"
+
+// Set per fork in [base] build_flags so the source stays mergeable with upstream,
+// whose releases remain the default.
+#ifndef OTA_RELEASE_REPO
+#define OTA_RELEASE_REPO "crosspoint-reader/crosspoint-reader"
+#endif
 
 namespace {
-constexpr char latestReleaseUrl[] = "https://api.github.com/repos/crosspoint-reader/crosspoint-reader/releases/latest";
+constexpr char latestReleaseUrl[] = "https://api.github.com/repos/" OTA_RELEASE_REPO "/releases/latest";
 }  // namespace
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
@@ -28,8 +35,9 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   // Stream the ~32KB release JSON straight into the parser as it arrives.
   // Buffering the whole body in a std::string would add a growing allocation
   // on top of the TLS session's heap during the fetch; with -fno-exceptions an
-  // OOM there aborts. fetchUrl handles the verified-https GET, redirects, and
-  // User-Agent (see HttpDownloader).
+  // OOM there aborts. fetchUrl handles the https GET, redirects, and User-Agent
+  // (see HttpDownloader) -- but not certificate verification: FREEINK_NET_WOLFSSL
+  // makes it call setInsecure() on every hop.
   ReleaseJsonParser releaseParser;
   // Each board updates from its own release asset: plain firmware.bin for the
   // C3 X4/X3 binary (pre-existing releases), firmware-<board>.bin otherwise.
@@ -62,9 +70,24 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return NO_UPDATE;
   }
 
+  // Size is checked here, not in installUpdate: esp_ota_begin erases the whole
+  // slot up front and an oversize image would only fail on the last write, after
+  // the entire download.
+  const esp_partition_t* updatePartition = esp_ota_get_next_update_partition(nullptr);
+  if (!updatePartition) {
+    LOG_ERR("OTA", "No OTA partition available");
+    return INTERNAL_UPDATE_ERROR;
+  }
+  const size_t assetSize = releaseParser.getFirmwareSize();
+  if (assetSize > updatePartition->size) {
+    LOG_ERR("OTA", "Release image too large: %zu bytes, partition holds %lu", assetSize,
+            static_cast<unsigned long>(updatePartition->size));
+    return INTERNAL_UPDATE_ERROR;
+  }
+
   latestVersion = releaseParser.getTagName();
   otaUrl = releaseParser.getFirmwareUrl();
-  otaSize = releaseParser.getFirmwareSize();
+  otaSize = assetSize;
   totalSize = otaSize;
   updateAvailable = true;
 
@@ -74,46 +97,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
 }
 
 bool OtaUpdater::isUpdateNewer() const {
-  if (!updateAvailable || latestVersion.empty() || latestVersion == CROSSPOINT_VERSION) {
-    return false;
-  }
-
-  int currentMajor, currentMinor, currentPatch;
-  int latestMajor, latestMinor, latestPatch;
-
-  const auto currentVersion = CROSSPOINT_VERSION;
-
-  // semantic version check (only match on 3 segments)
-  sscanf(latestVersion.c_str(), "%d.%d.%d", &latestMajor, &latestMinor, &latestPatch);
-  sscanf(currentVersion, "%d.%d.%d", &currentMajor, &currentMinor, &currentPatch);
-
-  /*
-   * Compare major versions.
-   * If they differ, return true if latest major version greater than current major version
-   * otherwise return false.
-   */
-  if (latestMajor != currentMajor) return latestMajor > currentMajor;
-
-  /*
-   * Compare minor versions.
-   * If they differ, return true if latest minor version greater than current minor version
-   * otherwise return false.
-   */
-  if (latestMinor != currentMinor) return latestMinor > currentMinor;
-
-  /*
-   * Check patch versions.
-   */
-  if (latestPatch != currentPatch) return latestPatch > currentPatch;
-
-  // If we reach here, it means all segments are equal.
-  // One final check, if we're on an RC build (contains "-rc"), we should consider the latest version as newer even if
-  // the segments are equal, since RC builds are pre-release versions.
-  if (strstr(currentVersion, "-rc") != nullptr) {
-    return true;
-  }
-
-  return false;
+  return updateAvailable && ota_version::isNewerVersion(latestVersion.c_str(), CROSSPOINT_VERSION);
 }
 
 const std::string& OtaUpdater::getLatestVersion() const { return latestVersion; }
