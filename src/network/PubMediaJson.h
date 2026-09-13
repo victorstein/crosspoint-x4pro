@@ -45,10 +45,12 @@ class PubMediaJsonParser {
     EntryFile,
   };
 
+  // Default-initialized so the whole stack is well-defined at construction:
+  // reset() only rewinds depth_, leaving frames above it untouched.
   struct Frame {
-    Node node;
-    bool isArray;
-    uint16_t index;  // index of the element being read, for array frames
+    Node node = Node::Other;
+    bool isArray = false;
+    uint16_t index = 0;  // index of the element being read, for array frames
   };
 
   static void sOnKey(void* ctx, const char* key, size_t len);
