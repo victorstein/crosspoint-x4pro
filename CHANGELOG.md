@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.1](https://github.com/victorstein/crosspoint-x4pro/compare/v1.6.0...v1.6.1) (2026-09-13)
+
+
+### Documentation
+
+* park the publication download spec with its decisions settled ([a5930df](https://github.com/victorstein/crosspoint-x4pro/commit/a5930dfadc148f547ff799a46933eefdf5810b23))
+* record the release and flashing workflow ([addaa20](https://github.com/victorstein/crosspoint-x4pro/commit/addaa20918400146136a888dcee5a47bb0bdb784))
+* spec publication download, with the 99 MB gate resolved ([8cdf807](https://github.com/victorstein/crosspoint-x4pro/commit/8cdf807f0400167f27f79d5d5084a00c6917645f))
+
 ## [1.6.0](https://github.com/victorstein/crosspoint-x4pro/compare/v1.5.0...v1.6.0) (2026-09-13)
 
 
