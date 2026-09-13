@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -27,6 +28,11 @@ struct MenuResult {
 struct ChapterResult {
   int spineIndex = 0;
   std::string anchor;
+  // Exact visible-codepoint offset to land on within the chapter, when the
+  // source picked a position inside it (a Bible verse). Verse markers are
+  // spans, which the layout parser excludes from the anchor map, so an anchor
+  // cannot carry this.
+  std::optional<uint32_t> offsetJump;
 };
 
 struct PercentResult {

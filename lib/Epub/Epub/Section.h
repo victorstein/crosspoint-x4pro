@@ -127,6 +127,11 @@ class Section {
   // True if this spine's unzipped HTML is already cached, so a build won't pay the (multi-second on a
   // giant spine) zip inflation. Lets the reader skip the indexing popup on a fast reopen/rebuild.
   bool hasHtmlCache() const;
+  // Inflate this spine item's XHTML if it is not cached already. On success `parsePath` names the
+  // readable file: htmlCachePath() when `promoted`, else an un-promoted temp at `tmpHtmlPath` that
+  // the caller owns and must remove. The rename can fail without the inflate having failed, so the
+  // two cannot collapse into a single bool.
+  bool ensureHtmlCache(std::string& parsePath, bool& promoted, std::string& tmpHtmlPath);
   // Inflated copy of this spine item on SD, written during the build. Callers
   // that need the source bytes should read this rather than re-inflating the
   // zip entry, which is a multi-second stall on a large spine item.

@@ -3,6 +3,7 @@
 #include <Print.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +30,10 @@ class Epub {
   std::unique_ptr<CssParser> cssParser;
   // CSS files
   std::vector<std::string> cssFiles;
+  // Resolved on first query and memoised: resolveHrefToSpineIndex on a miss
+  // walks the whole spine with no early exit, so probing it per Select Chapter
+  // would tax every non-Bible book.
+  mutable std::optional<int> bibleBookNavSpine;
 
   bool findContentOpfFile(std::string* contentOpfFile) const;
   bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true);
@@ -77,4 +82,12 @@ class Epub {
   float calculateProgress(int currentSpineIndex, float currentSpineRead) const;
   CssParser* getCssParser() const { return cssParser.get(); }
   int resolveHrefToSpineIndex(const std::string& href) const;
+  // Single forward pass over the spine resolving many filenames at once.
+  // `filenames` are bare basenames and `out` is filled with spine indices, -1
+  // where absent. Resolving them one by one instead costs one full sweep each,
+  // and every sweep is two SD seeks plus a heap std::string per spine item.
+  void resolveFilenamesToSpineIndices(const std::string* filenames, int* out, int count) const;
+  // Spine index of biblebooknav.xhtml, or -1 when this is not an NWT-shaped
+  // Bible. That filename is the feature gate for verse navigation.
+  int getBibleBookNavSpineIndex() const;
 };

@@ -8,6 +8,7 @@
 #include <Utf8.h>
 #include <ZipFile.h>
 
+#include "Epub/BibleNavScanner.h"
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
@@ -943,4 +944,28 @@ int Epub::resolveHrefToSpineIndex(const std::string& href) const {
     if (spineFilename == targetFilename) return i;
   }
   return -1;
+}
+
+void Epub::resolveFilenamesToSpineIndices(const std::string* filenames, int* out, const int count) const {
+  for (int i = 0; i < count; i++) out[i] = -1;
+  if (count <= 0 || !bookMetadataCache || !bookMetadataCache->isLoaded()) return;
+
+  int remaining = count;
+  const int spineCount = getSpineItemsCount();
+  for (int i = 0; i < spineCount && remaining > 0; i++) {
+    const auto spineHref = getSpineItem(i).href;
+    const std::string_view spineFilename = BibleNav::filenameTail(spineHref);
+    for (int j = 0; j < count; j++) {
+      if (out[j] != -1 || std::string_view(filenames[j]) != spineFilename) continue;
+      out[j] = i;
+      remaining--;
+    }
+  }
+}
+
+int Epub::getBibleBookNavSpineIndex() const {
+  if (!bibleBookNavSpine) {
+    bibleBookNavSpine = resolveHrefToSpineIndex(BibleNav::BOOK_NAV_FILENAME);
+  }
+  return *bibleBookNavSpine;
 }

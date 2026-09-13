@@ -21,6 +21,7 @@
 
 #include "../../util/BookmarkFile.h"
 #include "../../util/HighlightFile.h"
+#include "BibleNavigationActivity.h"
 #include "BookmarkEntry.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -761,16 +762,25 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         }
         section.reset();
       }
-      startActivityForResult(
-          std::make_unique<EpubReaderChapterSelectionActivity>(renderer, mappedInput, epub, spineIdx),
-          [this](const ActivityResult& result) {
-            if (result.isCancelled) {
-              openReaderMenu();
-              return;
-            }
-            const auto& chapterResult = std::get<ChapterResult>(result.data);
-            navigateTo({.spineIndex = chapterResult.spineIndex, .anchor = chapterResult.anchor});
-          });
+      // A Bible gets the book -> chapter -> verse drill-down instead of the flat
+      // TOC; detection is one memoised spine sweep, so a non-Bible book pays it
+      // at most once for the life of the Epub.
+      std::unique_ptr<Activity> chapterList;
+      if (epub && epub->getBibleBookNavSpineIndex() >= 0) {
+        chapterList = std::make_unique<BibleNavigationActivity>(renderer, mappedInput, epub);
+      } else {
+        chapterList = std::make_unique<EpubReaderChapterSelectionActivity>(renderer, mappedInput, epub, spineIdx);
+      }
+      startActivityForResult(std::move(chapterList), [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          openReaderMenu();
+          return;
+        }
+        const auto& chapterResult = std::get<ChapterResult>(result.data);
+        navigateTo({.spineIndex = chapterResult.spineIndex,
+                    .offsetJump = chapterResult.offsetJump,
+                    .anchor = chapterResult.anchor});
+      });
       break;
     }
     case EpubReaderMenuActivity::MenuAction::FOOTNOTES: {

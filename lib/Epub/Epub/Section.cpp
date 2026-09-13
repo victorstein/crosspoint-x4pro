@@ -253,35 +253,11 @@ bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::functio
   return buildComplete_;
 }
 
-bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void()>& popupFn) {
-  if (build_) {
-    LOG_ERR("SCT", "startBuild called while a build is already active");
-    return false;
-  }
-  buildComplete_ = false;
-  builtPageCount_ = 0;
-  // Pages from a loaded partial stay readable (from filePath) while this build writes
-  // to the tmp .bin, so availability never drops below the partial's watermark.
-  pageCount = partial_ ? partialPageCount_ : 0;
-
-  // Remove a stale tmp .bin from a crash-interrupted build; this build recreates it.
-  {
-    const std::string staleTmp = binTmpPath();
-    if (Storage.exists(staleTmp.c_str())) {
-      Storage.remove(staleTmp.c_str());
-    }
-  }
-
+bool Section::ensureHtmlCache(std::string& parsePath, bool& promoted, std::string& tmpHtmlPath) {
   const auto localPath = epub->getSpineItem(spineIndex).href;
   const auto htmlDir = epub->getCachePath() + "/html";
   const auto htmlPath = htmlCachePath();
-  const auto tmpHtmlPath = htmlDir + "/.tmp_" + std::to_string(spineIndex) + ".html";
-
-  // Create cache directory if it doesn't exist
-  {
-    const auto sectionsDir = epub->getCachePath() + "/sections";
-    Storage.mkdir(sectionsDir.c_str());
-  }
+  tmpHtmlPath = htmlDir + "/.tmp_" + std::to_string(spineIndex) + ".html";
 
   // Reuse the previously unzipped HTML if we already have it. The unzipped HTML is keyed only on the
   // book (it lives in the per-book cache dir), not on render settings, so it survives the invalidation
@@ -346,8 +322,47 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     }
   }
 
+  promoted = htmlCached;
+  parsePath = htmlCached ? htmlPath : tmpHtmlPath;
+  return true;
+}
+
+bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void()>& popupFn) {
+  if (build_) {
+    LOG_ERR("SCT", "startBuild called while a build is already active");
+    return false;
+  }
+  buildComplete_ = false;
+  builtPageCount_ = 0;
+  // Pages from a loaded partial stay readable (from filePath) while this build writes
+  // to the tmp .bin, so availability never drops below the partial's watermark.
+  pageCount = partial_ ? partialPageCount_ : 0;
+
+  // Remove a stale tmp .bin from a crash-interrupted build; this build recreates it.
+  {
+    const std::string staleTmp = binTmpPath();
+    if (Storage.exists(staleTmp.c_str())) {
+      Storage.remove(staleTmp.c_str());
+    }
+  }
+
+  const auto localPath = epub->getSpineItem(spineIndex).href;
+
+  // Create cache directory if it doesn't exist
+  {
+    const auto sectionsDir = epub->getCachePath() + "/sections";
+    Storage.mkdir(sectionsDir.c_str());
+  }
+
+  std::string parsePath;
+  bool htmlCached = false;
+  std::string tmpHtmlPath;
+  if (!ensureHtmlCache(parsePath, htmlCached, tmpHtmlPath)) {
+    return false;
+  }
+
   if (!Storage.openFileForWrite("SCT", binTmpPath(), file)) {
-    if (!reusedHtml) Storage.remove(tmpHtmlPath.c_str());
+    if (!htmlCached) Storage.remove(tmpHtmlPath.c_str());
     return false;
   }
   // Header is written with the incomplete-version sentinel; finalizeBuild() commits it.
@@ -358,15 +373,15 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     LOG_ERR("SCT", "OOM: BuildContext");
     file.close();
     Storage.remove(binTmpPath().c_str());
-    if (!reusedHtml) Storage.remove(tmpHtmlPath.c_str());
+    if (!htmlCached) Storage.remove(tmpHtmlPath.c_str());
     return false;
   }
   // htmlCached == "htmlPath is the live cache" (reused, or just promoted). finalizeBuild/abandonBuild
   // then leave the cached HTML alone; only an un-promoted temp (rename failed) is theirs to clean up.
   ctx->reusedHtml = htmlCached;
-  ctx->htmlPath = htmlPath;
+  ctx->htmlPath = htmlCachePath();
   ctx->tmpHtmlPath = tmpHtmlPath;
-  ctx->parsePath = htmlCached ? htmlPath : tmpHtmlPath;
+  ctx->parsePath = parsePath;
 
   // Derive the content base directory and image cache path prefix for the parser
   const size_t lastSlash = localPath.find_last_of('/');
@@ -414,7 +429,7 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
     if (ctx->cssParser) ctx->cssParser->clear();
     file.close();
     Storage.remove(binTmpPath().c_str());
-    if (!reusedHtml) Storage.remove(tmpHtmlPath.c_str());
+    if (!htmlCached) Storage.remove(tmpHtmlPath.c_str());
     return false;
   }
 

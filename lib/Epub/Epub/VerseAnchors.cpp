@@ -64,7 +64,7 @@ void XMLCALL onDefault(void* userData, const XML_Char* s, const int len) {
 Scanner::Scanner() {
   auto* state = new (std::nothrow) State();
   if (!state) return;
-  state->anchors.reserve(64);  // a long chapter runs to ~176 verses; 64 covers most
+  state->anchors.reserve(176);  // Psalm 119, the longest chapter, so a growth never fragments DRAM
 
   XML_Parser parser = XML_ParserCreate(nullptr);
   if (!parser) {

@@ -76,3 +76,6 @@ add_subdirectory(verse_anchors)
 add_subdirectory(tag_rows)
 
 add_subdirectory(return_stack)
+
+add_subdirectory(bible_nav_scanner)
+add_subdirectory(bible_book_join)
