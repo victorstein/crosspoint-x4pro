@@ -37,8 +37,14 @@ uname -s
 **Cross-Platform Code Formatting**:
 
 ```bash
-./bin/clang-format-fix -g
+./bin/clang-format-fix -g   # while working: only Git-modified files
+./bin/clang-format-fix      # before committing: the whole tree, as CI does
 ```
+
+**Run the unsuffixed form before you commit.** CI runs `./bin/clang-format-fix` over the entire
+tree (`.github/workflows/ci.yml`), while `-g` only reaches files Git currently reports as
+modified. A file you create and commit is no longer "modified", so `-g` silently skips it and the
+CI format job fails on work that looked clean locally.
 
 Never invoke or probe `clang-format` directly. The repository wrapper is the only sanctioned entry point.
 
@@ -604,6 +610,9 @@ pio check
 
 # Format only Git-modified C/C++ files, on every host
 ./bin/clang-format-fix -g
+
+# Format the whole tree -- what CI checks. Run this before committing.
+./bin/clang-format-fix
 ```
 
 Do not run raw `clang-format` or probe it with `command -v`; use the wrapper even for diagnostics.
@@ -890,7 +899,7 @@ build_flags =
 **AI agent scope** (what you CAN verify):
 
 1. ✅ **Build**: Build once after the last code edit with the relevant `pio run` target. Do not clean by default, repeat a target that already passed, or rebuild after formatting/comment-only/documentation-only changes.
-2. ✅ **Quality**: `pio check` when relevant + `./bin/clang-format-fix -g`
+2. ✅ **Quality**: `pio check` when relevant + `./bin/clang-format-fix` (full tree, matching CI; `-g` alone misses newly added files once they are committed)
 3. ✅ **Format**: Commit messages (`feat:`/`fix:`), no `.gitignore`-excluded files staged (e.g., `*.generated.h`, `.pio/`, `platformio.local.ini`)
 4. ✅ **CI**: Fix GitHub Actions failures before review
 5. ✅ **Code review**: Ensure orientation-aware logic is correct in all 4 modes by inspecting switch/case coverage
@@ -916,7 +925,7 @@ build_flags =
 
 - **Fix CI failures BEFORE** requesting review
 - CI runs on: Push to PR, PR updates
-- Format check fails → Run `./bin/clang-format-fix -g`
+- Format check fails → Run `./bin/clang-format-fix` (no `-g`; CI checks the whole tree)
 - Build check fails → Fix compile errors
 
 ---
