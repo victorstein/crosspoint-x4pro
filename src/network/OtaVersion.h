@@ -16,9 +16,10 @@ inline bool parseVersionTriple(const char* version, int& major, int& minor, int&
 inline bool isNewerVersion(const char* latest, const char* current) {
   if (!latest || !*latest || !current) return false;
 
-  // A device flashed over the air reports exactly the tag it was built from, so
-  // this is the common "already up to date" path. It is also what stops the -rc
-  // tie-break below from offering an RC build its own running image forever.
+  // Fast "already up to date" path when the strings match exactly. They need not:
+  // release-please tags are v-prefixed while the build reports a bare triple, and
+  // the comparison below handles that. What this does catch unconditionally is the
+  // -rc tie-break, which would otherwise offer an RC build its own running image.
   if (std::strcmp(latest, current) == 0) return false;
 
   int latestMajor = 0, latestMinor = 0, latestPatch = 0;

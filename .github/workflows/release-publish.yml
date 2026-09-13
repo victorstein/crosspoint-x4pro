@@ -1,23 +1,42 @@
-name: Compile Release
+name: Publish Release Firmware
 
-# Builds every board's release firmware on tag push, with the .bin named
-# exactly as OtaUpdater requests it from the GitHub release: plain
-# firmware.bin for the C3 X4/X3 binary, firmware-<board>.bin for every other
-# board, then publishes them as the release assets OTA downloads.
-
-# Bare semver only. Upstream tags inherited by a fork (1.6.0rc, v1.5.0, ...) name
-# commits without this fork's features, and publishing one would make every fork
-# device update itself onto upstream firmware.
+# Builds every board's release firmware and attaches it to the release
+# release-please has already cut, with the .bin named exactly as OtaUpdater
+# requests it from the GitHub release: plain firmware.bin for the C3 X4/X3
+# binary, firmware-<board>.bin for every other board.
+#
+# Dispatch-only, never tag-triggered: release-please cuts its tag with
+# GITHUB_TOKEN, and a GITHUB_TOKEN-created tag does not trigger workflows.
+# stein-infra's tofu-managed release-please fires this via
+# `gh workflow run release-publish.yml` after the tag exists.
 on:
-  push:
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
+  resolve-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Resolve latest release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # release-please created the release just before this workflow was
+          # fired, so the latest release is the one to publish artifacts for.
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          if [ -z "$TAG" ]; then
+            echo "::error::No release found to publish artifacts for."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build-release:
+    needs: resolve-tag
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -34,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
           submodules: recursive
 
       - uses: actions/setup-python@v6
@@ -86,7 +106,7 @@ jobs:
             .pio/build/${{ matrix.pio_env }}/partitions.bin
 
   publish-release:
-    needs: build-release
+    needs: [resolve-tag, build-release]
     runs-on: ubuntu-latest
     # Only this fork publishes; a downstream fork of it builds but stays silent.
     if: github.repository == 'victorstein/crosspoint-x4pro'
@@ -104,9 +124,11 @@ jobs:
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve-tag.outputs.tag }}
         run: |
           # All four boards are attached, not just one: the device picks the asset
           # name from its own board tag, so a missing board finds nothing to update
-          # from. The upload fallback keeps a re-run or a moved tag idempotent.
-          gh release create "$GITHUB_REF_NAME" --generate-notes dist/*/firmware*.bin \
-            || gh release upload "$GITHUB_REF_NAME" dist/*/firmware*.bin --clobber
+          # from. release-please already created the release, so this only uploads;
+          # --clobber keeps a re-dispatch idempotent.
+          gh release upload "$TAG" dist/*/firmware*.bin \
+            --repo "$GITHUB_REPOSITORY" --clobber

@@ -68,7 +68,10 @@ def get_base_version(project_dir):
     if not os.path.isfile(ini_path):
         warn(f'platformio.ini not found at {ini_path}; base version will be "0.0.0"')
         return '0.0.0'
-    config = configparser.ConfigParser()
+    # Match PlatformIO's own parser: an inline comment on the version line
+    # (the release-please markers live on their own lines, but any other
+    # trailing comment would otherwise land inside CROSSPOINT_VERSION).
+    config = configparser.ConfigParser(inline_comment_prefixes=('#', ';'))
     config.read(ini_path, encoding='utf-8')
     if not config.has_option('crosspoint', 'version'):
         warn('No [crosspoint] version in platformio.ini; base version will be "0.0.0"')
@@ -79,7 +82,7 @@ def get_base_version(project_dir):
 def inject_version(env):
     # Only applies to development environments; release envs set the
     # version via build_flags in platformio.ini and are unaffected.
-    if env['PIOENV'] not in ('default', 'sticky'):
+    if env['PIOENV'] not in ('default', 'sticky', 'x4pro'):
         return
 
     project_dir = env['PROJECT_DIR']

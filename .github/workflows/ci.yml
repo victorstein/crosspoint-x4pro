@@ -7,6 +7,15 @@ on:
     # pull request was ever checked -- the formatting gate first ran on PR #1
     # and found 25 stale files.
     branches: [main]
+    # release-please's own commits touch none of the firmware. Without this,
+    # onboarding and every version bump re-run the 4-board matrix, which has no
+    # concurrency guard.
+    paths-ignore:
+      - 'release-please-config.json'
+      - '.release-please-manifest.json'
+      - 'version.txt'
+      - 'CHANGELOG.md'
+      - '.github/workflows/release-please.yml'
   pull_request:
 
 permissions:
