@@ -27,6 +27,19 @@ class HalClock {
   // Returns false if RTC is not available.
   bool getTime(uint8_t& hour, uint8_t& minute) const;
 
+  struct Date {
+    uint16_t year;  // full year, e.g. 2026
+    uint8_t month;  // 1-12
+    uint8_t day;    // 1-31
+  };
+
+  // Get the current UTC calendar date straight from the RTC, uncached.
+  // Returns false when there is no RTC or it reports its oscillator stopped --
+  // the only trustworthy "never set" signal, since system time is 1970 on any
+  // boot that has not run syncFromNTP() and the persisted clockHasBeenSynced
+  // setting survives from earlier boots.
+  bool getDate(Date& date) const;
+
   // Format time into a caller-provided buffer.
   // 24h mode produces "HH:MM" (needs >=6 bytes); 12h mode produces "H:MM AM"/"HH:MM PM" (needs >=9 bytes).
   // utcOffsetQuarterHoursBiased: biased quarter-hour offset (48 = UTC+0, 0 = UTC-12, 104 = UTC+14).

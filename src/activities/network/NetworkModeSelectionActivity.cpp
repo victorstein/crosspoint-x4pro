@@ -11,11 +11,11 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_NETWORK, StrId::STR_CALIBRE_WIRELESS, StrId::STR_CREATE_HOTSPOT};
+    StrId::STR_JOIN_NETWORK, StrId::STR_CALIBRE_WIRELESS, StrId::STR_MEETING_PUBLICATIONS, StrId::STR_CREATE_HOTSPOT};
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_DESC, StrId::STR_CALIBRE_DESC, StrId::STR_HOTSPOT_DESC};
+    StrId::STR_JOIN_DESC, StrId::STR_CALIBRE_DESC, StrId::STR_MEETING_PUBLICATIONS_DESC, StrId::STR_HOTSPOT_DESC};
 constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {UIIcon::Wifi, UIIcon::Library,
-                                                                             UIIcon::Hotspot};
+                                                                             UIIcon::Book, UIIcon::Hotspot};
 }  // namespace
 
 NetworkModeSelectionActivity::NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -45,6 +45,8 @@ void NetworkModeSelectionActivity::activateIndex(const int index) {
   if (index == 1) {
     mode = NetworkMode::CONNECT_CALIBRE;
   } else if (index == 2) {
+    mode = NetworkMode::MEETING_PUBLICATIONS;
+  } else if (index == 3) {
     mode = NetworkMode::CREATE_HOTSPOT;
   }
   onModeSelected(mode);

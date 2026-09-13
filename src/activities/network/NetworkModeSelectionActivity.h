@@ -2,12 +2,13 @@
 
 #include "activities/UiListActivity.h"
 
-enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, CREATE_HOTSPOT };
+enum class NetworkMode { JOIN_NETWORK, CONNECT_CALIBRE, MEETING_PUBLICATIONS, CREATE_HOTSPOT };
 
 /**
  * NetworkModeSelectionActivity presents the user with a choice:
  * - "Join a Network" - Connect to an existing WiFi network (STA mode)
  * - "Connect to Calibre" - Use Calibre wireless device transfers
+ * - "Meeting Publications" - Download this week's meeting publications
  * - "Create Hotspot" - Create an Access Point that others can connect to (AP mode)
  *
  * The onModeSelected callback is called with the user's choice.
@@ -19,7 +20,7 @@ class NetworkModeSelectionActivity final : public UiListActivity {
  public:
   explicit NetworkModeSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput);
 
-  static constexpr int MENU_ITEM_COUNT = 3;
+  static constexpr int MENU_ITEM_COUNT = 4;
 
   void onModeSelected(NetworkMode mode);
   void onCancel();
