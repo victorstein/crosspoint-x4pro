@@ -37,6 +37,7 @@ TEST(PubMediaJson, ReadsTheWatchtowerEpub) {
     EXPECT_STREQ(parser.url(), "https://cfp2.jw-cdn.org/a/717b307/1/o/w_S_202607.epub") << "chunk size " << chunk;
     EXPECT_EQ(parser.filesize(), 3718294u) << "chunk size " << chunk;
     EXPECT_STREQ(parser.checksum(), "c0208a4acad782f4295753992134bad5") << "chunk size " << chunk;
+    EXPECT_STREQ(parser.pubName(), "La Atalaya (ed. estudio)") << "chunk size " << chunk;
   }
 }
 
@@ -49,6 +50,8 @@ TEST(PubMediaJson, ReadsTheWorkbookEpub) {
     EXPECT_STREQ(parser.url(), "https://cfp2.jw-cdn.org/a/24f3ed/1/o/mwb_S_202609.epub") << "chunk size " << chunk;
     EXPECT_EQ(parser.filesize(), 3335824u) << "chunk size " << chunk;
     EXPECT_STREQ(parser.checksum(), "9516fc6ae0c0c204a9883e9069ffdb18") << "chunk size " << chunk;
+    EXPECT_STREQ(parser.pubName(), "Guía de actividades para la reunión Vida y Ministerio Cristianos")
+        << "chunk size " << chunk;
   }
 }
 
@@ -106,6 +109,57 @@ TEST(PubMediaJson, IgnoresOtherLanguages) {
   EXPECT_EQ(parser.filesize(), 0u);
 }
 
+// parentPubName sits immediately beside pubName at the root and is the key a
+// prefix or substring match would take instead.
+TEST(PubMediaJson, TakesPubNameAndNotParentPubName) {
+  const std::string body = R"json({
+    "pubName": "La Atalaya (ed. estudio)",
+    "parentPubName": "La Atalaya",
+    "files": {"S": {"EPUB": [{"file": {"url": "https://cdn/w.epub"}, "filesize": 7}]}}
+  })json";
+  PubMediaJsonParser parser("S");
+  parser.feed(body.data(), body.size());
+  EXPECT_STREQ(parser.pubName(), "La Atalaya (ed. estudio)");
+}
+
+// The root-level match must not pick a pubName nested inside another object.
+TEST(PubMediaJson, IgnoresANestedPubName) {
+  const std::string body = R"({
+    "pubName": "Outer",
+    "files": {"S": {"EPUB": [{"pubName": "Inner", "file": {"url": "https://cdn/w.epub"}, "filesize": 7}]}}
+  })";
+  PubMediaJsonParser parser("S");
+  parser.feed(body.data(), body.size());
+  EXPECT_STREQ(parser.pubName(), "Outer");
+}
+
+TEST(PubMediaJson, ReportsNoPubNameWhenAbsent) {
+  const std::string body = R"({
+    "files": {"S": {"EPUB": [{"file": {"url": "https://cdn/w.epub"}, "filesize": 7}]}}
+  })";
+  PubMediaJsonParser parser("S");
+  parser.feed(body.data(), body.size());
+  EXPECT_STREQ(parser.pubName(), "");
+}
+
+// pubName reaches 196 bytes in Khmer; anything past the buffer is cut, and a cut
+// landing mid-sequence would reach SdFat as an invalid UTF-8 filename.
+TEST(PubMediaJson, TruncatesAnOverlongPubNameOnACodepointBoundary) {
+  std::string name;
+  for (int i = 0; i < 120; ++i) name += "\u00e9";
+  const std::string body =
+      R"json({"pubName": ")json" + name +
+      R"json(", "files": {"S": {"EPUB": [{"file": {"url": "https://cdn/w.epub"}, "filesize": 7}]}}})json";
+
+  PubMediaJsonParser parser("S");
+  parser.feed(body.data(), body.size());
+
+  const std::string captured = parser.pubName();
+  ASSERT_LT(captured.size(), name.size());
+  EXPECT_EQ(captured.size() % 2, 0u) << "cut landed mid-sequence";
+  EXPECT_EQ(captured, name.substr(0, captured.size()));
+}
+
 TEST(PubMediaJson, ResetClearsPriorResults) {
   const std::string body = loadFixture("pubmedia_w_202607_S.json");
   PubMediaJsonParser parser("S");
@@ -115,4 +169,5 @@ TEST(PubMediaJson, ResetClearsPriorResults) {
   EXPECT_FALSE(parser.found());
   EXPECT_EQ(parser.filesize(), 0u);
   EXPECT_STREQ(parser.checksum(), "");
+  EXPECT_STREQ(parser.pubName(), "");
 }

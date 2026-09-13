@@ -12,7 +12,8 @@
  * keeps its own container stack and only accepts values at
  * files.<language>.EPUB[0].{file.url, file.checksum, filesize}. The response
  * carries a pubImage.url (an empty string) ahead of files, so a first-url-wins
- * or last-key-wins matcher reads the wrong field.
+ * or last-key-wins matcher reads the wrong field. pubName is taken at the root,
+ * where parentPubName sits immediately beside it, so the key match is exact.
  */
 class PubMediaJsonParser {
  public:
@@ -31,6 +32,9 @@ class PubMediaJsonParser {
   // Lowercase hex MD5, "" when the response omitted it.
   const char* checksum() const { return checksum_; }
   uint64_t filesize() const { return filesize_; }
+  // Publication name as published, "" when the response omitted it. Sized for
+  // the 196-byte worst case across languages (Khmer).
+  const char* pubName() const { return pubName_; }
 
  private:
   static constexpr size_t MAX_DEPTH = 16;
@@ -78,5 +82,6 @@ class PubMediaJsonParser {
 
   char url_[160];
   char checksum_[33];
+  char pubName_[208];
   uint64_t filesize_;
 };

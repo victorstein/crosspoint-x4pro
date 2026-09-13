@@ -14,11 +14,14 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
+#include "RecentBooksStore.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "network/HttpDownloader.h"
+#include "network/MeetingFilename.h"
 #include "network/PubMediaJson.h"
 #include "util/BookCacheUtils.h"
 #include "util/TaskWatchdog.h"
@@ -40,6 +43,12 @@ constexpr size_t HASH_CHUNK_BYTES = 2048;
 constexpr int HASH_CHUNKS_PER_WATCHDOG_RESET = 64;
 
 constexpr MeetingPub PUBLICATION_ORDER[] = {MeetingPub::Watchtower, MeetingPub::Workbook};
+
+// Matches Epub's own key derivation (Epub.h:48): the cache directory is the hash
+// of the full path as passed in, so it moves whenever the file is renamed.
+std::string bookCachePath(const std::string& bookPath) {
+  return "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(bookPath));
+}
 
 // Mirrors the OPDS download target: the configured folder, created on demand,
 // falling back to the SD root so a download is never lost to a failed mkdir.
@@ -142,6 +151,12 @@ void MeetingDownloadActivity::fail(const char* message) {
   requestUpdate();
 }
 
+void MeetingDownloadActivity::reportPhase(const char* message) {
+  state = State::RESOLVING;
+  statusMessage = message;
+  requestUpdateAndWait();
+}
+
 void MeetingDownloadActivity::runSequence() {
   // The first paint has to land before the resolve phases block the loop task
   // for up to a minute each; fetchUrl takes neither a progress nor a cancel hook.
@@ -229,7 +244,7 @@ bool MeetingDownloadActivity::downloadPublication(const MeetingPub pub, const ch
     return false;
   }
 
-  const std::string filename = filenameFromUrl(media->url());
+  const std::string filename = meetingPublicationFilename(media->pubName(), issue, media->url());
   if (filename.empty()) {
     LOG_ERR("MEET", "Unusable media url: %s", media->url());
     fail(tr(STR_DOWNLOAD_FAILED));
@@ -243,6 +258,14 @@ bool MeetingDownloadActivity::downloadPublication(const MeetingPub pub, const ch
   destPath += filename;
 
   currentFilename = filename;
+
+  if (!Storage.exists(destPath.c_str())) migrateCdnNamedCopy(media->url(), destPath);
+  if (alreadyOnCard(destPath, media->filesize())) {
+    LOG_INF("MEET", "Skipping %s, already on the card", destPath.c_str());
+    reportPhase(tr(STR_ALREADY_DOWNLOADED));
+    return true;
+  }
+
   state = State::DOWNLOADING;
   statusMessage = tr(STR_DOWNLOADING);
   downloadProgress = 0;
@@ -344,6 +367,60 @@ bool MeetingDownloadActivity::matchesChecksum(const std::string& path, const cha
   char actual[33];
   md5.getChars(actual);
   return strcasecmp(actual, expectedMd5) == 0;
+}
+
+bool MeetingDownloadActivity::alreadyOnCard(const std::string& path, const uint64_t advertisedSize) const {
+  // filesize is absent from some responses and reads back as 0, which a 0-byte
+  // file on the card would match forever with no way to repair itself.
+  if (advertisedSize == 0 || !Storage.exists(path.c_str())) return false;
+
+  HalFile file;
+  if (!Storage.openFileForRead("MEET", path, file)) return false;
+  const auto actualSize = static_cast<uint64_t>(file.fileSize());
+  // The caller renames or downloads over this path next, and SdFat needs it
+  // closed for either.
+  file.close();
+
+  if (actualSize == advertisedSize) return true;
+  LOG_INF("MEET", "%s is %llu bytes, expected %llu: downloading again", path.c_str(),
+          static_cast<unsigned long long>(actualSize), static_cast<unsigned long long>(advertisedSize));
+  return false;
+}
+
+void MeetingDownloadActivity::migrateCdnNamedCopy(const std::string& url, const std::string& destPath) {
+  const std::string cdnName = filenameFromUrl(url);
+  if (cdnName.empty()) return;
+  const std::string srcPath = downloadFolder + "/" + cdnName;
+  if (srcPath == destPath || !Storage.exists(srcPath.c_str())) return;
+
+  if (!Storage.rename(srcPath.c_str(), destPath.c_str())) {
+    LOG_ERR("MEET", "Rename %s -> %s failed, downloading under the new name", srcPath.c_str(), destPath.c_str());
+    return;
+  }
+
+  // Anything already keyed to the new path belongs to an earlier file of the
+  // same name — one deleted over the web server or WebDAV, neither of which
+  // clears the cache the way the file browser does. Clearing it before the cache
+  // directory moves in both frees the destination for the rename and stops the
+  // migrated book rendering from another issue's sections.
+  clearBookCache(destPath);
+
+  const std::string oldCachePath = bookCachePath(srcPath);
+  const std::string newCachePath = bookCachePath(destPath);
+  // Moving the directory carries progress.bin with it, so reading position and
+  // the cover survive the rename.
+  if (Storage.exists(oldCachePath.c_str()) && !Storage.rename(oldCachePath.c_str(), newCachePath.c_str())) {
+    LOG_ERR("MEET", "Failed to rename cache dir %s -> %s (non-fatal)", oldCachePath.c_str(), newCachePath.c_str());
+  }
+
+  RECENT_BOOKS.updatePath(srcPath, destPath, oldCachePath, newCachePath);
+  if (APP_STATE.openEpubPath == srcPath) {
+    APP_STATE.openEpubPath = destPath;
+    APP_STATE.saveToFile();
+  }
+
+  LOG_INF("MEET", "Renamed %s -> %s", srcPath.c_str(), destPath.c_str());
+  reportPhase(tr(STR_RENAMED_EXISTING));
 }
 
 void MeetingDownloadActivity::rootScreen(UiScreen& screen, void* user) {

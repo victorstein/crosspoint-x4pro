@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "activities/Activity.h"
@@ -40,6 +41,9 @@ class MeetingDownloadActivity final : public Activity, private UiAppHost {
   bool scanWeek(const IsoWeek& week, WolWeekScanner& scanner);
   bool downloadPublication(MeetingPub pub, const char* issue);
   bool matchesChecksum(const std::string& path, const char* expectedMd5) const;
+  bool alreadyOnCard(const std::string& path, uint64_t advertisedSize) const;
+  void migrateCdnNamedCopy(const std::string& url, const std::string& destPath);
+  void reportPhase(const char* message);
   void fail(const char* message);
 
   // "" when no folder is configured or it could not be created, meaning SD root.

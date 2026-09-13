@@ -441,3 +441,5 @@ STR_NO_PUBLICATIONS_FOUND: "No se pudieron determinar las publicaciones de esta 
 STR_CLOCK_NOT_SET: "Ajuste el reloj antes de descargar"
 STR_WORKBOOK_UNAVAILABLE: "Esta semana no se publica ninguna guía"
 STR_CHECKSUM_MISMATCH: "La suma de verificación no coincide; se descartó la descarga"
+STR_ALREADY_DOWNLOADED: "Ya está en la tarjeta"
+STR_RENAMED_EXISTING: "Se renombró una copia anterior"
