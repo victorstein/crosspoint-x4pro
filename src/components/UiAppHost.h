@@ -24,9 +24,16 @@ class UiAppHost {
   // One shared instantiation for every FUI screen (the largest of the sizes
   // the screens used to pick individually): FreeInkApp, Screen and Frame are
   // capacity-templated, so per-screen capacities each minted a fresh copy of
-  // that code in flash. The wider interaction buffer costs ~300 bytes of RAM
-  // per live host, bounded by the activity stack depth.
-  using UiApp = freeink::ui::FreeInkApp<24, 6>;
+  // that code in flash.
+  //
+  // The cap has to clear the densest screen's element count: FreeInkUI drops
+  // every interaction past it, and a dropped element is silently untappable
+  // (renderUi() logs the overflow). The Bible number grid's 48-cell page is
+  // the current high-water mark. The buffer is double-buffered and an
+  // Interaction is 16 B, so each slot costs 32 B -- 2 KB per live host at 64,
+  // bounded by the activity stack depth.
+  static constexpr size_t MAX_INTERACTIONS = 64;
+  using UiApp = freeink::ui::FreeInkApp<MAX_INTERACTIONS, 6>;
   using UiScreen = UiApp::ScreenType;
 
   explicit UiAppHost(const GfxRenderer& renderer);

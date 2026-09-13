@@ -88,3 +88,5 @@ add_subdirectory(meeting_filename)
 add_subdirectory(bible_nav_scanner)
 add_subdirectory(bible_book_join)
 add_subdirectory(bible_chapter_number)
+
+add_subdirectory(number_grid)

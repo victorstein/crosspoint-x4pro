@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "NumberGridLayout.h"
 #include "activities/UiListActivity.h"
 
 // Book -> chapter -> verse drill-down for NWT-shaped Bible publications, whose
@@ -17,8 +18,9 @@
 // would keep three activities and three row-buffer sets resident and would
 // hand-propagate the verse result up two intermediate handlers.
 //
-// Tap or Confirm a chapter to open it at verse 1; long-press (or hold Confirm)
-// to list its verses instead.
+// The book level is a vertical list (book names are long and variable width);
+// the chapter and verse levels are paged number grids, so a high reference costs
+// pages instead of screens. Tap or Confirm a chapter to list its verses.
 class BibleNavigationActivity final : public UiListActivity {
  public:
   BibleNavigationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::shared_ptr<Epub>& epub);
@@ -37,8 +39,9 @@ class BibleNavigationActivity final : public UiListActivity {
   // viewport are materialized, and refreshing the window batch-prewarms its
   // fallback glyphs so repaints inside it stay RAM-only.
   static constexpr int ROW_WINDOW = 24;
-  // A held Confirm release opens the verse list, as in HighlightsActivity.
-  static constexpr int OPEN_VERSE_LIST_MS = 700;
+  static constexpr int MAX_GRID_CELLS = NumberGrid::MAX_CELLS;
+  // "176" plus its NUL: no chapter or verse number reaches four digits.
+  static constexpr int CELL_LABEL_BYTES = 4;
 
   std::shared_ptr<Epub> epub;
   Level level = Level::Book;
@@ -64,11 +67,24 @@ class BibleNavigationActivity final : public UiListActivity {
   std::vector<VerseAnchors::VerseAnchor> verseAnchors;
   int verseSpine = -1;
 
+  // Book level only: the row window the vertical list draws from.
   std::string windowLabels[ROW_WINDOW];
   freeink::ui::ListItem windowItems[ROW_WINDOW];
   int windowStart = -1;
   int windowCount = 0;
   void refreshRowWindow(int start);
+
+  // Grid levels only. `grid` carries the last grid build's geometry, which the
+  // loop task reads to page and to step the selection by a row.
+  freeink::ui::KeyGridKey cells[MAX_GRID_CELLS] = {};
+  char cellLabels[MAX_GRID_CELLS][CELL_LABEL_BYTES] = {};
+  NumberGrid::Geometry grid{};
+  bool isGridLevel() const { return level != Level::Book; }
+  void buildNumberGrid(UiScreen& screen);
+  // Move the selection and bring its page with it. The base moveSelectionTo
+  // pulls a sliding row window instead, which would leave nav.top off a page
+  // boundary.
+  void moveGridSelection(int index);
 
   bool loadBooks();
   bool loadChapters(int bookIndex);
@@ -83,12 +99,12 @@ class BibleNavigationActivity final : public UiListActivity {
   int listCount() const override;
   void buildScreen(UiScreen& screen) override;
   void activateIndex(int index) override;
-  void onRowLongPress(int index) override;
-  bool handleButtons() override;
+  // Swipes page the grid by a whole page; the base scrolls by rows.
+  bool handleCustomInput() override;
+  // Grid levels step the selection by a row (a column count) and page on a
+  // held button; the base steps by one row either way.
+  void navigateButtons() override;
   void onBackButton() override;
   // Header is drawn inside the safe area (not full-width like the base).
   void drawChrome() override;
-  // Chapter level names the hold gesture on the Confirm hint; the other levels
-  // keep the plain Select label.
-  void drawFooter() override;
 };

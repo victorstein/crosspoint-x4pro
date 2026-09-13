@@ -21,9 +21,6 @@ namespace fui = freeink::ui;
 
 namespace {
 
-// Longest row label at the chapter and verse levels is "176".
-constexpr int NUMBER_LABEL_BYTES = 8;
-
 void copyTruncated(char* dest, const size_t destBytes, const std::string& source) {
   const size_t fit = source.size() < destBytes - 1 ? source.size() : destBytes - 1;
   // A byte-cut would feed drawText an incomplete UTF-8 sequence, which renders
@@ -45,7 +42,7 @@ bool feedVerseScanner(void* ctx, const char* chunk, const size_t length, const b
 
 BibleNavigationActivity::BibleNavigationActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                                  const std::shared_ptr<Epub>& epub)
-    : UiListActivity("BibleNavigation", renderer, mappedInput, /*wantsTouchLongPress=*/true), epub(epub) {}
+    : UiListActivity("BibleNavigation", renderer, mappedInput, /*wantsTouchLongPress=*/false), epub(epub) {}
 
 void BibleNavigationActivity::onEnter() {
   UiListActivity::onEnter();
@@ -170,7 +167,17 @@ void BibleNavigationActivity::enterLevel(const Level next, const int selected) {
     windowCount = 0;
     nav.reset();
     nav.selected = selected < 0 || selected >= listCount() ? 0 : selected;
-    nav.follow(listCount());
+    if (isGridLevel()) {
+      // reset() leaves visibleRows at 1 and only syncToProps -- the list path,
+      // which no grid level takes -- ever writes it, so follow(), scrollBy()
+      // and pageRows() would all treat a single cell as a whole viewport. One
+      // grid "row" is one page. The geometry is the last grid build's; the
+      // first build fixes it up (buildNumberGrid).
+      nav.visibleRows = grid.cellsPerPage() > 0 ? grid.cellsPerPage() : 1;
+      nav.top = NumberGrid::pageStartFor(nav.selected, listCount(), nav.visibleRows);
+    } else {
+      nav.follow(listCount());
+    }
   }
   requestUpdate();
 }
@@ -185,15 +192,7 @@ void BibleNavigationActivity::refreshRowWindow(const int start) {
   windowCount = total - clamped < ROW_WINDOW ? total - clamped : ROW_WINDOW;
   for (int i = 0; i < windowCount; i++) {
     const int row = clamped + i;
-    if (level == Level::Book) {
-      windowLabels[i] = bookName[row];
-    } else {
-      char label[NUMBER_LABEL_BYTES];
-      const unsigned number =
-          level == Level::Verse ? static_cast<unsigned>(verseAnchors[row].verse) : static_cast<unsigned>(row + 1);
-      snprintf(label, sizeof(label), "%u", number);
-      windowLabels[i] = label;
-    }
+    windowLabels[i] = bookName[row];
     fui::ListItem item;
     item.label = windowLabels[i].c_str();
     item.actionValue = static_cast<int16_t>(row);
@@ -241,8 +240,10 @@ void BibleNavigationActivity::activateIndex(const int index) {
 
   switch (level) {
     case Level::Book:
+      // The five single-chapter books have no chapter level, so their row is
+      // the only route to their verses.
       if (bookIsDirect[index]) {
-        finishWith(bookTargetSpine[index], std::nullopt);
+        openVerseList(bookTargetSpine[index], -1);
         return;
       }
       selectedBook = index;
@@ -254,7 +255,7 @@ void BibleNavigationActivity::activateIndex(const int index) {
       enterLevel(Level::Chapter, 0);
       return;
     case Level::Chapter:
-      finishWith(chapterSpine[index], std::nullopt);
+      openVerseList(chapterSpine[index], index);
       return;
     case Level::Verse:
       finishWith(verseSpine, verseAnchors[index].offset);
@@ -262,48 +263,58 @@ void BibleNavigationActivity::activateIndex(const int index) {
   }
 }
 
-void BibleNavigationActivity::onRowLongPress(const int index) {
-  if (index < 0 || index >= listCount()) return;
-
-  switch (level) {
-    case Level::Book:
-      // Only the single-chapter books have verses to list from here; every
-      // other book's long-press falls through to its chapter list.
-      if (bookIsDirect[index]) {
-        openVerseList(bookTargetSpine[index], -1);
-        return;
-      }
-      activateIndex(index);
-      return;
-    case Level::Chapter:
-      openVerseList(chapterSpine[index], index);
-      return;
-    case Level::Verse:
-      activateIndex(index);
-      return;
+void BibleNavigationActivity::moveGridSelection(const int index) {
+  const int count = listCount();
+  if (count <= 0) return;
+  const int clamped = std::clamp(index, 0, count - 1);
+  {
+    // Same nav-vs-render race moveSelectionTo guards: the render task reads the
+    // selection and its page together mid-build.
+    RenderLock lock;
+    nav.selected = clamped;
+    nav.top = NumberGrid::pageStartFor(clamped, count, grid.cellsPerPage());
   }
+  requestUpdate();
 }
 
-bool BibleNavigationActivity::handleButtons() {
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    onBackButton();
-    return true;
+bool BibleNavigationActivity::handleCustomInput() {
+  // Reading the gesture at the book level would take it away from the base
+  // loop's row scrolling.
+  if (!isGridLevel()) return false;
+  const int cellsPerPage = grid.cellsPerPage();
+  if (cellsPerPage <= 0) return false;
+
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe != MappedInputManager::SwipeDir::Up && swipe != MappedInputManager::SwipeDir::Down) return false;
+
+  const int count = listCount();
+  const int page = NumberGrid::pageOfIndex(nav.top, cellsPerPage);
+  const int next = swipe == MappedInputManager::SwipeDir::Up ? page + 1 : page - 1;
+  // Consumed either way: the base loop would otherwise scroll the viewport a
+  // single cell off its page boundary.
+  if (next >= 0 && next < NumberGrid::pageCount(count, cellsPerPage)) {
+    moveGridSelection(NumberGrid::pageFirstCell(next, cellsPerPage));
+  }
+  return true;
+}
+
+void BibleNavigationActivity::navigateButtons() {
+  if (!isGridLevel() || !grid.valid()) {
+    UiListActivity::navigateButtons();
+    return;
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    const int selected = nav.selected;
-    if (selected < 0 || selected >= listCount()) return true;
-    // Button hardware has no long-press gesture, so a held Confirm release
-    // stands in for it -- the pattern HighlightsActivity uses for delete.
-    if (mappedInput.getHeldTime() > OPEN_VERSE_LIST_MS) {
-      onRowLongPress(selected);
-    } else {
-      activateIndex(selected);
-    }
-    return true;
-  }
-
-  return false;
+  const int count = listCount();
+  const int cols = grid.cols;
+  const int cellsPerPage = grid.cellsPerPage();
+  buttonNavigator.onNextRelease([this, cols] { moveGridSelection(nav.selected + cols); });
+  buttonNavigator.onPreviousRelease([this, cols] { moveGridSelection(nav.selected - cols); });
+  buttonNavigator.onNextContinuous([this, count, cellsPerPage] {
+    moveGridSelection(ButtonNavigator::nextPageIndex(nav.selected, count, cellsPerPage));
+  });
+  buttonNavigator.onPreviousContinuous([this, count, cellsPerPage] {
+    moveGridSelection(ButtonNavigator::previousPageIndex(nav.selected, count, cellsPerPage));
+  });
 }
 
 void BibleNavigationActivity::cancel() {
@@ -348,21 +359,16 @@ void BibleNavigationActivity::buildScreen(UiScreen& screen) {
     return;
   }
 
-  // The long-press is the only way into the verse list and touch hardware has
-  // no button-hint band to advertise it in, so the chapter list says so itself.
-  if (level == Level::Chapter && mappedInput.hasTouch()) {
-    fui::TextStyle hint = screen.theme().bodyText;
-    hint.align = fui::TextAlign::Center;
-    const int16_t lineHeight = screen.target().lineHeight(hint.font);
-    screen.target().text(screen.takeTop(lineHeight, metrics.verticalSpacing), tr(STR_HOLD_FOR_VERSES), hint);
+  if (isGridLevel()) {
+    buildNumberGrid(screen);
+    return;
   }
 
   fui::ListProps props;
   props.count = static_cast<uint16_t>(listCount());
   props.action = ACTION_ROW;
-  // Tap descends a level; long-press on a chapter opens its verses. Physical
-  // buttons stay in loop().
-  props.inputMask = fui::InputTouch | fui::InputLongPress;
+  // Tap descends a level; physical buttons stay in loop().
+  props.inputMask = fui::InputTouch;
   syncListViewport(screen, props);
   // Materialize the row window for the final viewport (syncListViewport just
   // applied follow/clamping to nav.top) and hand list() the window with its
@@ -373,6 +379,59 @@ void BibleNavigationActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
+void BibleNavigationActivity::buildNumberGrid(UiScreen& screen) {
+  const fui::Rect body = screen.body();
+  grid = NumberGrid::geometryFor(body.width, body.height);
+  const int cellsPerPage = grid.cellsPerPage();
+  const int count = listCount();
+
+  // An orientation change re-pages around the selection rather than leaving
+  // nav.top on a page the new geometry no longer has.
+  if (nav.visibleRows != cellsPerPage) {
+    nav.visibleRows = cellsPerPage;
+    nav.top = NumberGrid::pageStartFor(nav.selected, count, cellsPerPage);
+  }
+  const int pageFirst = NumberGrid::pageStartFor(nav.top, count, cellsPerPage);
+  nav.top = pageFirst;
+
+  for (int i = 0; i < cellsPerPage; i++) {
+    const int row = pageFirst + i;
+    fui::KeyGridKey cell;
+    if (row < count) {
+      const unsigned number =
+          level == Level::Verse ? static_cast<unsigned>(verseAnchors[row].verse) : static_cast<unsigned>(row + 1);
+      snprintf(cellLabels[i], CELL_LABEL_BYTES, "%u", number);
+      cell.label = cellLabels[i];
+      // ACTION_ROW dispatch (onRowAction) indexes the level by this value, so
+      // it is the absolute row, not the cell's place on the page.
+      cell.value = static_cast<int16_t>(row);
+    } else {
+      // The page stays rectangular; a disabled cell registers no interaction.
+      cell.kind = fui::KeyKind::Disabled;
+      cell.enabled = false;
+    }
+    cells[i] = cell;
+  }
+
+  fui::KeyGridProps props;
+  props.keys = cells;
+  props.rows = static_cast<uint8_t>(grid.rows);
+  props.cols = static_cast<uint8_t>(grid.cols);
+  // keyGrid compares this against a page-relative cell index, unlike the
+  // absolute value each cell carries.
+  props.selectedIndex = static_cast<int16_t>(NumberGrid::pageRelativeIndex(nav.selected, pageFirst, cellsPerPage));
+  props.action = ACTION_ROW;
+  props.inputMask = fui::InputTouch;
+  props.gap = NumberGrid::GAP;
+  // Above the cell size, ensureMinTouchRect would grow each hit rect past its
+  // own cell and neighbouring numbers would swallow each other's taps.
+  props.minTouchSize = static_cast<int16_t>(NumberGrid::cellSizeFor(body.width, body.height, grid));
+  props.labelText = screen.theme().bodyText;
+  props.labelText.align = fui::TextAlign::Center;
+  props.keyStyles = screen.theme().key;
+  fui::keyGrid(screen.frame(), body, props);
+}
+
 void BibleNavigationActivity::drawChrome() {
   const char* title = tr(STR_SELECT_BOOK);
   if (level == Level::Chapter) title = tr(STR_SELECT_CHAPTER);
@@ -381,14 +440,4 @@ void BibleNavigationActivity::drawChrome() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const Rect safe = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   GUI.drawHeader(renderer, Rect{safe.x, safe.y + metrics.topPadding, safe.width, metrics.headerHeight}, title);
-}
-
-void BibleNavigationActivity::drawFooter() {
-  // Holding Confirm on a chapter row is the only route to the verse list, so
-  // the hint belongs on the button that carries the gesture. Touch boards draw
-  // no hint band at all (buttonHintsHeight is 0 there) and get the same hint as
-  // a line above the list instead -- see buildScreen.
-  const char* confirmLabel = level == Level::Chapter ? tr(STR_HOLD_FOR_VERSES) : tr(STR_SELECT);
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirmLabel, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
-  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }

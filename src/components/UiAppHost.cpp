@@ -1,5 +1,7 @@
 #include "UiAppHost.h"
 
+#include <Logging.h>
+
 #include "UiAppHelpers.h"
 
 namespace fui = freeink::ui;
@@ -15,6 +17,12 @@ void UiAppHost::resetUi() {
 void UiAppHost::renderUi() {
   app.setDevice(uiTarget.deviceContext());
   app.render();
+  // Past the cap FreeInkUI drops hit rects and returns false without an assert
+  // or a log of its own, so the affected elements would just never respond to
+  // touch. Nothing else in the firmware watches this flag.
+  if (app.interactionOverflowed()) {
+    LOG_ERR("UI", "Interaction table overflowed (cap %u)", static_cast<unsigned>(MAX_INTERACTIONS));
+  }
   uiReady = true;
 }
 
