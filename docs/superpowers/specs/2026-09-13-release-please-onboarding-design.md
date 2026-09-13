@@ -227,6 +227,42 @@ merges, so it can stay in the rendered config.
 (`1.5.0` + a `feat:` → `1.6.0`). `bootstrap_sha` bounds the *commit range*. Setting only the first —
 as the earlier draft did — gets the right number attached to the wrong history.
 
+## Make a dev build say which commit it is
+
+Today there is no way to tell which commit a device is running. `/api/status` reports
+`1.5.0-x4pro` for **every** x4pro dev build, so two builds four merges apart are indistinguishable
+remotely — which already cost us a "did the flash take?" question we could not answer.
+
+The machinery exists and simply excludes this board. `scripts/git_branch.py:78-91` builds
+`{base}-dev-{branch}-{short_sha}` and injects it, but bails immediately:
+
+```python
+if env['PIOENV'] not in ('default', 'sticky'):
+    return
+```
+
+because `[env:x4pro]` sets `-DCROSSPOINT_VERSION=\"${crosspoint.version}-x4pro\"` in its own
+`build_flags`.
+
+**The change is two edits that must happen together:**
+
+1. Add `'x4pro'` to that tuple.
+2. **Remove** the `-DCROSSPOINT_VERSION` line from `[env:x4pro]`'s `build_flags`. Leaving both in
+   place defines the macro twice — `env.Append(CPPDEFINES=...)` plus the build flag — which is a
+   redefinition, not an override.
+
+**Do not touch `x4pro-gh_release`.** Release builds must keep reporting the bare
+`${crosspoint.version}`: that string is what OTA compares against the tag, and a sha suffix there
+would break the equality short-circuit in `OtaVersion.h`. The tuple gates on the env name, so the
+release env is unaffected by construction — but it is the obvious thing to get wrong.
+
+The dev string loses its `-x4pro` marker (becoming `1.5.0-dev-main-abc1234`, like the other dev
+envs). That is fine: `/api/status` already reports `device: xteink_x4_pro` separately, so the board
+is never ambiguous.
+
+**Why it belongs in this PR:** once releases are automated, telling a local dev build from an
+OTA-installed release becomes a routine question, and `-dev-` in the version answers it at a glance.
+
 ## Ordering — and why it matters
 
 The skill is explicit: *"App-repo guard/publish PRs merge **first**"*, and *"Merging the stein-infra
