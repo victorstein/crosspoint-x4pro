@@ -8,10 +8,13 @@
 namespace {
 
 void safeCopy(char* dst, const size_t dstSize, const char* src, const size_t srcLen) {
-  size_t n = srcLen < dstSize - 1 ? srcLen : dstSize - 1;
-  // A byte-wise cut can land mid-sequence, and the dangling lead byte reaches
-  // SdFat as an invalid UTF-8 filename under USE_UTF8_LONG_NAMES.
-  if (n < srcLen) n = static_cast<size_t>(utf8SafeTruncateBuffer(src, static_cast<int>(n)));
+  const size_t capacity = dstSize - 1;
+  size_t n = srcLen;
+  if (n > capacity) {
+    // A byte-wise cut can land mid-sequence, and the dangling lead byte reaches
+    // SdFat as an invalid UTF-8 filename under USE_UTF8_LONG_NAMES.
+    n = static_cast<size_t>(utf8SafeTruncateBuffer(src, static_cast<int>(capacity)));
+  }
   memcpy(dst, src, n);
   dst[n] = '\0';
 }
