@@ -1,7 +1,7 @@
 # Automated releases via stein-infra's release-please
 
 **Date:** 2026-09-13
-**Status:** Design v1
+**Status:** Design v2 (revised after adversarial review)
 **Target:** `victorstein/crosspoint-x4pro` + `victorstein/stein-infra`
 **Delivery:** two coordinated PRs, app repo first (see Ordering)
 **Builds on:** `2026-09-13-fork-ota-releases-design.md` (merged as #16, `729a1de6`)
@@ -12,6 +12,11 @@ Merging a PR lands code and nothing else. `release.yml` fires only on `push: tag
 release is a manual tag, and `[crosspoint] version` has to be kept in step with that tag by hand.
 Put this repo on the same automated release process the rest of the estate uses, so a merged
 `feat:`/`fix:` produces a versioned release with binaries attached and the device can see it.
+
+**This repo is not a GitHub fork.** `gh api ... --jq .fork` returns **false** with a null `parent`;
+it is a standalone repo carrying upstream history, which `tofu/repos.tf:387-390` documents
+deliberately. So none of the forked-repo restrictions on Actions, releases or the `gh release` API
+apply — an assumption worth stating because it was asserted the other way earlier.
 
 ## Non-goals
 
@@ -44,7 +49,10 @@ From the skill's collateral table:
 
 That is `release.yml` exactly. A tag created with `GITHUB_TOKEN` does not trigger other workflows,
 so under release-please our four-board publish would **silently never run**. The chain step already
-exists in the shared workflow and fires unconditionally:
+exists in the shared workflow, but it is **gated on `release_created`** (`release-please.yml:59-69`) —
+not unconditional, as an earlier draft said. The `|| true` is on the command, not the step. So the
+onboarding push opens the Release PR (no dispatch), auto-merges it, re-fires, and only that **second**
+run cuts the tag and dispatches:
 
 ```bash
 gh workflow run release-publish.yml -R "$REPO" || true
@@ -54,36 +62,44 @@ The `|| true` means a repo without the file is fine — and also that a *broken*
 
 ### `release.yml` → `release-publish.yml`
 
-Model it on `tawtui`'s working version:
+Model it on `tawtui`'s working version. **It is three jobs, not one** — the earlier draft collapsed
+them and would have uploaded nothing:
 
 ```yaml
-on:
-  workflow_dispatch: {}
-permissions:
-  contents: write
+on: { workflow_dispatch: {} }
+permissions: { contents: write }
 jobs:
-  publish:
+  resolve-tag:                       # NEW: the matrix needs the tag too
+    outputs: { tag: "${{ steps.tag.outputs.tag }}" }
     steps:
-      - name: Resolve latest release tag        # release-please just cut it
-        run: TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
-      - uses: actions/checkout@v4
-        with: { ref: "${{ steps.tag.outputs.tag }}", submodules: recursive }
-      # ... existing four-board matrix build, unchanged ...
-      - run: gh release upload "$TAG" dist/*/firmware*.bin --repo "$GITHUB_REPOSITORY" --clobber
+      - id: tag
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+  build-release:                     # #16's matrix job, two changes:
+    needs: resolve-tag
+    # checkout gains: ref: ${{ needs.resolve-tag.outputs.tag }}
+  publish-release:                   # #16's job, one change:
+    needs: [resolve-tag, build-release]
+    # KEEP download-artifact@v4 with path: dist
+    # gh release create||upload  ->  gh release upload "${{ needs.resolve-tag.outputs.tag }}" \
+    #                                  dist/*/firmware*.bin --clobber
 ```
 
-Three changes from what #16 merged:
+Why the single-job sketch fails: with a matrix on the publishing job the upload runs **four times**,
+each leg seeing only its own board, and `dist/*/firmware*.bin` expands to nothing because `dist/`
+only exists via the `download-artifact` step. The resolve step must be its own job so the build
+matrix can consume its output.
 
-1. **Trigger** becomes `workflow_dispatch` only. The `tags: ['[0-9]+.[0-9]+.[0-9]+']` filter is
-   **deleted**, not adjusted — see the tag-format trap below.
-2. **`gh release create` becomes `gh release upload --clobber`.** release-please owns the tag,
-   release and changelog now; this workflow only attaches binaries. Creating would fail against the
-   release that already exists.
-3. **The build must check out the released tag**, not the default branch, or it publishes binaries
-   built from whatever `main` happens to be.
+**`GITHUB_REF_NAME` must go.** `release.yml:111-112` uses it for the tag; on `workflow_dispatch` it
+is the **branch** (`main`), so left in place it would create a release tagged `main`. Replacing those
+two lines is what removes the hazard — the earlier draft's "the matrix carries over unchanged" invited
+leaving it.
 
-The matrix, the artifact layout and the `dist/*/firmware*.bin` glob carry over unchanged — that part
-of #16 was correct and is what makes the upload work.
+`contents: write` does suffice for `gh release upload`; `download-artifact` in the same run uses the
+runtime token. Copy tawtui's resolve step verbatim rather than the sketch above — note it needs the
+`GH_TOKEN` env, an `id:`, and `$GITHUB_OUTPUT`, and this repo uses `actions/checkout@v6`.
 
 ### The tag-format trap
 
@@ -111,7 +127,25 @@ forever. That is worse than today's manual drift, because it would look automate
 ### Decision: teach the tofu template `extra-files`
 
 `tofu/files/release-please-config.json.tftpl` currently emits a fixed config with no `extra-files`
-key. Add an optional passthrough:
+key, and `tofu/release-please.tf:67-76` builds the `packages` object with `jsonencode()`. **Both need
+changing**, and the earlier draft specified neither:
+
+- In the `.tf`, read the new fields with **`try(each.value.extra_files, [])`** and
+  `try(each.value.bootstrap_sha, null)`. A bare `each.value.extra_files` errors with *"This object
+  does not have an attribute named extra_files"* on the six repos that lack it (seed, dotfiles,
+  tawtui, WW-experience-migration, stein-home, nicaraguan-laws-MCP). The `for` expression itself is
+  safe — `local.fanout_repos` already maps heterogeneous entries the same way in production.
+- In the `.tftpl`, render both keys **conditionally**, so a repo without them produces
+  byte-identical output.
+
+**Why conditional rendering is not optional:** `github_repository_file.release_please_config` renders
+one `templatefile(...)` per opted-in repo. An unconditional key changes the rendered content for all
+**six** existing ones, pushing a config-sync commit to each `main` — which fires each repo's own
+`release-please.yml`. That directly contradicts this spec's own acceptance gate and stein-infra's
+rule that *"resources you didn't touch should not appear in the plan"*. **Expected plan: 1 repo
+changed, not 7.**
+
+Add an optional passthrough:
 
 ```hcl
 release_please = {
@@ -122,15 +156,37 @@ release_please = {
 }
 ```
 
-and in `platformio.ini`:
+and in `platformio.ini` — **the block form, not the inline one**:
 
 ```ini
 [crosspoint]
-version = 1.5.0 # x-release-please-version
+# x-release-please-start-version
+version = 1.5.0
+# x-release-please-end
 ```
 
-release-please's generic updater rewrites any line carrying that annotation, so `version.txt` and
-`platformio.ini` move together and the 11 interpolations keep working untouched.
+**An inline `# x-release-please-version` marker corrupts two of the four CI builds.** PlatformIO's
+own parser strips inline comments, so the 11 `${crosspoint.version}` interpolations survive — but
+there is a **12th consumer**: `scripts/git_branch.py` is a `pre:` script (`platformio.ini:127`) that
+reads the same key with a **bare** `configparser.ConfigParser()` (`git_branch.py:71`), which keeps
+inline comments. Verified against the real parsers:
+
+```
+bare parser (git_branch.py) -> '1.5.0 # x-release-please-version'
+PlatformIO's parser         -> '1.5.0'
+```
+
+It injects that string as `-DCROSSPOINT_VERSION` for the `default` and `sticky` envs
+(`git_branch.py:82-91`) — exactly two of the four boards `ci.yml` builds on every PR and every push
+to `main`. The About screen and OTA's `strcmp` short-circuit would both see
+`1.5.0 # x-release-please-version-dev-main-abc1234`.
+
+The **block** form is immune: both markers are full-line comments every INI parser ignores, and
+release-please's generic updater rewrites only the semver between them.
+
+**Additionally, fix `git_branch.py:71`** to `ConfigParser(inline_comment_prefixes=("#", ";"))`,
+matching PlatformIO's own parser. That is a latent bug independent of release-please — any inline
+comment on that line breaks the dev version string today.
 
 **Rejected alternative: make `platformio.ini` read `version.txt`.** PlatformIO's ini cannot read a
 file, so it would need a `pre:` script injecting `-DCROSSPOINT_VERSION`, which means deleting the
@@ -138,6 +194,38 @@ macro from all 11 `build_flags` sites and reconstructing the board/rc suffix var
 (`-x4pro`, `-rc+hash`) in Python. That is a riskier change to the build for a worse outcome, and it
 helps no other repo. `extra_files` is additive, defaults empty, and any future non-npm repo whose
 version lives outside `version.txt` gets it free.
+
+## The changelog needs a floor: `bootstrap-sha`
+
+With **zero tags** in the repo, release-please's `backfillReleasesFromTags` finds no release for the
+manifest's `v1.5.0`, sets `needsBootstrap`, and then walks the branch with none of its three break
+conditions satisfied — bounded only by `commit-search-depth` (default **500**).
+
+Measured on the real history: **1,248 commits on `main`**, of which **359 of the most recent 500**
+are `feat:`/`fix:`. So the first Release PR and the newly created `CHANGELOG.md` would carry roughly
+**430 entries of upstream crosspoint-reader history this tree never released**. (Reassuringly, there
+are **0** `!`/`BREAKING CHANGE` markers in all 1,248 commits, so no surprise `2.0.0`.)
+
+The fix is a root-level `"bootstrap-sha"`, which the tofu template also does not support — so this is
+a **second** passthrough of equal weight to `extra_files`, not a footnote:
+
+```hcl
+release_please = {
+  release_type  = "simple"
+  package_name  = "crosspoint-x4pro"
+  seed_version  = "1.5.0"
+  extra_files   = ["platformio.ini"]
+  bootstrap_sha = "af9e352f"   # one commit before PR #1
+}
+```
+
+`af9e352f` ("chore: adopt the tofu-managed repo scaffolding") sits immediately before `34f169a4`
+(PR #1), so the changelog starts at this tree's own work. It self-disables once the first Release PR
+merges, so it can stay in the rendered config.
+
+**`seed_version` and `bootstrap_sha` do different jobs.** `seed_version` sets the version baseline
+(`1.5.0` + a `feat:` → `1.6.0`). `bootstrap_sha` bounds the *commit range*. Setting only the first —
+as the earlier draft did — gets the right number attached to the wrong history.
 
 ## Ordering — and why it matters
 
@@ -158,13 +246,13 @@ install.
 
 | Check | This repo |
 | --- | --- |
-| Deploys on push to `main`? | **No.** `ci.yml` is PR/branch CI only; nothing deploys. |
+| Deploys on push to `main`? | **Nothing deploys**, so the skill's row is satisfied — but `ci.yml:3-10` *does* run on push to `main`, with a 4-board matrix and **no `concurrency:` block**. Onboarding pushes four files separately, so ~4 CI runs / ~16 firmware builds, and every version-bump merge re-runs it. Add `paths-ignore` for the release-please files to `ci.yml`'s push trigger, as `WW-experience-migration/deploy.yml` already does. |
 | Publishes artifacts on release? | **Yes** — handled above, the whole reason for step 1. |
 | Approval rulesets blocking bot self-merge? | **No** `rulesets` block in its `local.repos` entry (`tofu/repos.tf:394-398`), so no `bypass_actors` change needed. |
 
-`seed_version = "1.5.0"` — the fork's current `[crosspoint] version`, with no tags in the repo (the
+`seed_version = "1.5.0"` — this tree's current `[crosspoint] version`, with no tags in the repo (the
 36 inherited upstream ones were deleted). The skill warns never to regress it. **Upstream being at
-1.6.0 is irrelevant**: this fork's version line is its own, and seeding 1.6.0 to "catch up" would
+1.6.0 is irrelevant**: this tree's version line is its own, and seeding 1.6.0 to "catch up" would
 claim a version this tree has never shipped.
 
 ## Risks
@@ -181,6 +269,19 @@ claim a version this tree has never shipped.
   a conscious choice at the time rather than a surprise.
 - **Devices in the field.** Nothing reaches a device until it is flashed once with a build carrying
   #16's `OTA_RELEASE_REPO` flag. That bootstrap flash is still required and is unrelated to this.
+- **A ~15-minute window with a release but no assets.** release-please cuts the release, then
+  `release-publish` builds four boards. A check in that gap sees `/releases/latest` with no matching
+  asset; the device degrades correctly to `NO_UPDATE` (`OtaUpdater.cpp:68-71`) but reports "no update"
+  for a version that exists.
+- **`allow_auto_merge` is false on the repo**, so `gh pr merge --squash --auto` always falls through
+  to the immediate-merge fallback. The Release PR therefore merges **without waiting for `ci.yml`**.
+  Works, but it is not the gate it looks like.
+- **Doc drift to fix in the app-repo PR:** `AGENTS.md:921` still lists `release.yml` as "Release
+  Build"; `AGENTS.md:713` says integration targets `develop`, but the mechanism hardcodes `main`
+  everywhere, so a `develop`-targeted PR would be invisible to release-please. Also
+  `OtaVersion.h:19-22`'s comment ("a device flashed over the air reports exactly the tag") becomes
+  false under `v`-prefixed tags — the logic is still right (the triple comparison catches it), the
+  comment is not.
 
 ## Testing
 
