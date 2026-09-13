@@ -14,6 +14,7 @@
 #include "EpubReaderMenuActivity.h"
 #include "ProgressMapper.h"
 #include "ReaderActivity.h"
+#include "ReturnStack.h"
 
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
@@ -65,13 +66,7 @@ class EpubReaderActivity final : public ReaderActivity {
 
   // Footnote support
   std::vector<FootnoteEntry> currentPageFootnotes;
-  struct SavedPosition {
-    int spineIndex;
-    int pageNumber;
-  };
-  static constexpr int MAX_FOOTNOTE_DEPTH = 3;
-  SavedPosition savedPositions[MAX_FOOTNOTE_DEPTH] = {};
-  int footnoteDepth = 0;
+  ReturnStack returnStack;
 
   uint16_t buildViewportWidth = 0;
   uint16_t buildViewportHeight = 0;
@@ -111,6 +106,26 @@ class EpubReaderActivity final : public ReaderActivity {
   void addBookmark();
   void updateBookmarkFlag();
 
+  // What a navigation does to the return stack. Clear is the default so a new
+  // navigation feature cannot strand Back on a position the user has left.
+  enum class ReturnPolicy : uint8_t { Clear, Push, Preserve };
+  // ReuseIfSameSpine keeps a live section and only moves its page. It is legal
+  // only without an anchor or a percent jump, which are consumed during a
+  // section build and would otherwise leak into the next chapter's.
+  enum class SectionMode : uint8_t { Reset, ReuseIfSameSpine };
+
+  struct NavTarget {
+    int spineIndex;
+    int pageNumber = 0;
+    std::optional<uint32_t> offsetJump;
+    std::string anchor;
+    std::optional<float> spineProgress;
+    SectionMode sectionMode = SectionMode::Reset;
+  };
+
+  // The single choke point for moving the reader by explicit user choice.
+  // Takes RenderLock itself, so no caller may hold one.
+  void navigateTo(NavTarget target, ReturnPolicy policy = ReturnPolicy::Clear);
   void navigateToHref(const std::string& href, bool savePosition = false);
   void restoreSavedPosition();
 
