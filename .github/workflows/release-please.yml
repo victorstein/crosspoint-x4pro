@@ -35,6 +35,37 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
+          wait_for_pr_runs() {
+            # A pull_request run loads its workflow from the PR's merge commit. Merging
+            # before that happens fails every run as a zero-job "workflow file issue",
+            # before any job-level `if` is read. Wait until each run has jobs (or has
+            # finished), so release-PR guards conclude "skipped". Never gate on results.
+            local pr=$1 sha runs stable=0 start=$SECONDS
+            sha=$(gh pr view "$pr" -R "$REPO" --json headRefOid -q .headRefOid)
+            while [ $((SECONDS - start)) -lt 120 ]; do
+              sleep 5
+              runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request" \
+                       -q '.workflow_runs[] | "\(.id) \(.status)"')
+              if [ -z "$runs" ]; then
+                # No pull_request workflows in this repo.
+                [ $((SECONDS - start)) -ge 20 ] && return 0
+                continue
+              fi
+              local unloaded=0 id status
+              while read -r id status; do
+                [ "$status" = completed ] && continue
+                [ "$(gh api "repos/$REPO/actions/runs/$id/jobs" -q .total_count)" -eq 0 ] && unloaded=1
+              done <<< "$runs"
+              if [ "$unloaded" -eq 0 ]; then
+                stable=$((stable + 1))
+                [ "$stable" -ge 2 ] && return 0
+              else
+                stable=0
+              fi
+            done
+            echo "::warning::Release PR #$pr runs not started after 120s; merging anyway."
+          }
+
           # release-please opens Release PRs on `release-please--*` head
           # branches. Filter by head branch (set atomically at create time),
           # not the eventually-consistent `autorelease: pending` label.
@@ -44,6 +75,7 @@ jobs:
             echo "No Release PRs to merge."
           else
             for pr in $prs; do
+              wait_for_pr_runs "$pr"
               echo "Merging Release PR #$pr"
               gh pr merge "$pr" --squash --auto -R "$REPO" \
                 || gh pr merge "$pr" --squash -R "$REPO"
